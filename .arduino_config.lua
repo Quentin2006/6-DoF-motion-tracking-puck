@@ -1,5 +1,5 @@
 return {
-	board = "esp32:esp32:esp32s3",
-	port = "/dev/ttyACM0",
-	baudrate = "115200",
+  board = "arduino:avr:uno",
+  port = "/dev/ttyUSB0",
+  baudrate = "115200",
 }
