@@ -16,8 +16,7 @@
 
 constexpr float MOVEMENT_SPEED = 15.f;
 
-constexpr float DAMPING_RATE = 2.5f;
-constexpr float MAX_CUBE_SPEED = 12.0f;
+constexpr float ACCEL_POSITION_GAIN = 1.2f;  // 1g tilt ≈ 11.8 units (near CUBE_BOUND)
 constexpr float CUBE_BOUND = 12.0f;
 constexpr float ACCEL_DEADBAND = 0.1f;
 constexpr float ROTATION_SPEED = 125.f;
@@ -80,7 +79,6 @@ private:
   UniformBuffer lightUniformBuffer;
   UniformBuffer cameraUniformBuffer;
 
-  glm::vec3 cubeVelocity{0.0f};
   glm::vec3 cubeSpawn{0.0f};
 
   int subdivLevel = 0;
