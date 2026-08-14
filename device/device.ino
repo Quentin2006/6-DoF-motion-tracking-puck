@@ -1,5 +1,5 @@
+#include "MPU6050_6Axis_MotionApps612.h"
 #include <Wire.h>
-#include "MPU6050_6Axis_MotionApps20.h"
 
 MPU6050 mpu;
 Quaternion q;
@@ -11,7 +11,9 @@ void calibrateGyro() {
   int16_t x, y, z;
   for (int i = 0; i < SAMPLES; i++) {
     mpu.getRotation(&x, &y, &z);
-    sx += x; sy += y; sz += z;
+    sx += x;
+    sy += y;
+    sz += z;
     delay(5);
   }
   mpu.setXGyroOffset(-sx / SAMPLES);
@@ -24,7 +26,7 @@ void setup() {
   while (!Serial)
     ;
 
-  Wire.begin(4, 5);
+  Wire.begin(5, 4);
 
   Serial.println("Initing MPU6050...");
   mpu.initialize();

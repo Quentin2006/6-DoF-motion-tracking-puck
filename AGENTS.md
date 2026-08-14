@@ -12,11 +12,12 @@ Two-part system: `device/` (ESP32-S3 firmware) streams IMU orientation over seri
 
 ## Architecture
 
-- `device/device.ino`: MPU6050 DMP on I2C pins 4/5, boot gyro calibration, prints `qw qx qy qz temp` floats, 115200 baud
+- `device/device.ino`: MPU6050 DMP (MotionApps612) on I2C pins 4/5 — `Wire.begin(5, 4)` = SDA pin 5, SCL pin 4. Boot gyro calibration, prints `qw qx qy qz temp` floats, 115200 baud
 - `engine/src/app.cpp` `getDeviceData()`: opens `/dev/ttyACM0` directly (hardcoded, O_NONBLOCK), parses 5 floats (quaternion wxyz), normalizes, converts to Euler degrees for cube rotation
 - Board config duplicated: `sketch.yaml` and `.arduino_config.lua` (esp32s3, /dev/ttyACM0)
 
 ## Gotchas
 
 - No IMU attached → engine logs "failed to open /dev/ttyACM0" but continues running (identity quaternion)
+- DMP settles ~10s after boot: quaternion sweeps from identity to true orientation, then holds (residual ~0.03°/s). Don't mistake the startup sweep for drift
 - Must run `make compile-db` after device code changes or clangd shows stale errors
