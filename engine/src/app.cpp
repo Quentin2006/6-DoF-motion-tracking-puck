@@ -228,14 +228,16 @@ void App::run() {
     cube.rotation = glm::degrees(glm::eulerAngles(deviceData.orientation));
 
     // velocity + damping + clamp + bounds
-    cubeVelocity += deviceData.accel * deltaTime;
-    cubeVelocity *= std::exp(-2.5f * deltaTime);
-    if (glm::length(cubeVelocity) > 12.0f)
-      cubeVelocity = glm::normalize(cubeVelocity) * 12.0f;
+    glm::vec3 accel = deviceData.accel;
+    if (glm::length(accel) < ACCEL_DEADBAND)
+      accel = glm::vec3(0.0f);  // deadband: kill rest jitter crawl
+    cubeVelocity += accel * deltaTime;
+    cubeVelocity *= std::exp(-DAMPING_RATE * deltaTime);
+    if (glm::length(cubeVelocity) > MAX_CUBE_SPEED)
+      cubeVelocity = glm::normalize(cubeVelocity) * MAX_CUBE_SPEED;
     cube.position += cubeVelocity * deltaTime;
-    constexpr float BOUND = 12.0f;
-    if (glm::length(cube.position) > BOUND) {
-      cube.position = glm::normalize(cube.position) * BOUND;
+    if (glm::length(cube.position) > CUBE_BOUND) {
+      cube.position = glm::normalize(cube.position) * CUBE_BOUND;
       cubeVelocity = glm::vec3(0.0f);
     }
     if (input.r && !input.r_pressed) {

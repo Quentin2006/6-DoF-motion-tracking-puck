@@ -15,6 +15,11 @@
 #include <memory>
 
 constexpr float MOVEMENT_SPEED = 15.f;
+
+constexpr float DAMPING_RATE = 2.5f;
+constexpr float MAX_CUBE_SPEED = 12.0f;
+constexpr float CUBE_BOUND = 12.0f;
+constexpr float ACCEL_DEADBAND = 0.1f;
 constexpr float ROTATION_SPEED = 125.f;
 
 constexpr int COASTER_PATH_SEGMENTS = 1000;
