@@ -38,6 +38,8 @@ struct InputState {
   bool up = false, down = false, left = false, right = false;
   bool c = false;
   bool c_pressed = false;
+  bool r = false;
+  bool r_pressed = false;
   bool subdivUp = false, subdivDown = false;
   bool subdivUp_pressed = false, subdivDown_pressed = false;
 };
@@ -72,6 +74,9 @@ private:
   Registry registry;
   UniformBuffer lightUniformBuffer;
   UniformBuffer cameraUniformBuffer;
+
+  glm::vec3 cubeVelocity{0.0f};
+  glm::vec3 cubeSpawn{0.0f};
 
   int subdivLevel = 0;
   GLuint terrainEntityId;

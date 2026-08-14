@@ -13,6 +13,7 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
@@ -111,6 +112,7 @@ void App::loadObjectFromConfig(const ObjectConfig &cfg) {
 
 struct DeviceData {
   glm::quat orientation{1.0f, 0.0f, 0.0f, 0.0f};  // wxyz from DMP
+  glm::vec3 accel{0.0f};                            // m/s², world frame
   float temperature = 0;                            // °C
 };
 
@@ -153,9 +155,12 @@ void getDeviceData(DeviceData &out) {
     buffer.erase(0, pos + 1);
 
     glm::quat quat;
+    glm::vec3 accel;
     float temp;
-    if (line >> quat.w >> quat.x >> quat.y >> quat.z >> temp) {
+    if (line >> quat.w >> quat.x >> quat.y >> quat.z >> accel.x >>
+        accel.y >> accel.z >> temp) {
       last.orientation = glm::normalize(quat);
+      last.accel = accel;
       last.temperature = temp;
     }
   }
@@ -201,6 +206,8 @@ void App::run() {
   auto prevTime = std::chrono::steady_clock::now();
   float totalTime = 0;
 
+  cubeSpawn = registry.getTransform(0).position;
+
   while (!window.shouldClose()) {
     auto currentTime = std::chrono::steady_clock::now();
     auto deltaTime =
@@ -219,6 +226,25 @@ void App::run() {
 
     auto &cube = registry.getTransform(0);
     cube.rotation = glm::degrees(glm::eulerAngles(deviceData.orientation));
+
+    // velocity + damping + clamp + bounds
+    cubeVelocity += deviceData.accel * deltaTime;
+    cubeVelocity *= std::exp(-2.5f * deltaTime);
+    if (glm::length(cubeVelocity) > 12.0f)
+      cubeVelocity = glm::normalize(cubeVelocity) * 12.0f;
+    cube.position += cubeVelocity * deltaTime;
+    constexpr float BOUND = 12.0f;
+    if (glm::length(cube.position) > BOUND) {
+      cube.position = glm::normalize(cube.position) * BOUND;
+      cubeVelocity = glm::vec3(0.0f);
+    }
+    if (input.r && !input.r_pressed) {
+      input.r_pressed = true;
+      cube.position = cubeSpawn;
+      cubeVelocity = glm::vec3(0.0f);
+    } else if (!input.r) {
+      input.r_pressed = false;
+    }
 
     updateTransforms(registry);
     updateCamera(registry);

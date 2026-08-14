@@ -16,6 +16,7 @@ struct Controls {
   static const int ROTATE_YAW_RIGHT = GLFW_KEY_RIGHT;
 
   static const int NEXT_CAMERA = GLFW_KEY_C;
+  static const int RESET = GLFW_KEY_R;
 
   static const int SUBDIV_UP = GLFW_KEY_EQUAL;   // + key
   static const int SUBDIV_DOWN = GLFW_KEY_MINUS;  // - key
