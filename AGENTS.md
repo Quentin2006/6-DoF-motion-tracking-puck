@@ -12,7 +12,7 @@ Two-part system: `device/` (ESP32-S3 firmware) streams IMU orientation over seri
 
 ## Architecture
 
-- `device/device.ino`: MPU6050 DMP (MotionApps612) on I2C pins 4/5 — `Wire.begin(5, 4)` = SDA pin 5, SCL pin 4. Boot gyro calibration, prints `qw qx qy qz ax ay az temp` floats (quat wxyz, then world-frame linear accel m/s², gravity removed device-side), 115200 baud
+- `device/device.ino`: MPU6050 DMP (MotionApps612) on I2C pins 4/5 — `Wire.begin(5, 4)` = SDA pin 5, SCL pin 4. Boot gyro calibration (100 samples, fresh each boot, outlier-guarded), prints `qw qx qy qz ax ay az temp` floats (quat wxyz, then world-frame linear accel m/s², gravity removed device-side), 115200 baud
 - `engine/src/app.cpp` `getDeviceData()`: opens `/dev/ttyACM0` directly (hardcoded, O_NONBLOCK), parses 8 floats, normalizes quat, converts to Euler degrees for cube rotation; cube motion = accel → damped velocity (DAMPING_RATE/MAX_CUBE_SPEED/CUBE_BOUND in app.h), R resets to spawn
 - Board config duplicated: `sketch.yaml` and `.arduino_config.lua` (esp32s3, /dev/ttyACM0)
 
