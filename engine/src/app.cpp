@@ -227,16 +227,23 @@ void App::run() {
     auto &cube = registry.getTransform(0);
     cube.rotation = glm::degrees(glm::eulerAngles(deviceData.orientation));
 
-    // direct mapping: position follows accel instantly (no integration)
+    // velocity integration: position accumulates, damping settles, bounds clamp
     glm::vec3 accel = deviceData.accel;
     if (glm::length(accel) < ACCEL_DEADBAND)
-      accel = glm::vec3(0.0f);  // deadband: kill rest jitter
-    cube.position = cubeSpawn + accel * ACCEL_POSITION_GAIN;
-    if (glm::length(cube.position) > CUBE_BOUND)
+      accel = glm::vec3(0.0f);  // deadband: kill rest jitter crawl
+    cubeVelocity += accel * ACCEL_VELOCITY_GAIN * deltaTime;
+    cubeVelocity *= std::exp(-DAMPING_RATE * deltaTime);
+    if (glm::length(cubeVelocity) > MAX_CUBE_SPEED)
+      cubeVelocity = glm::normalize(cubeVelocity) * MAX_CUBE_SPEED;
+    cube.position += cubeVelocity * deltaTime;
+    if (glm::length(cube.position) > CUBE_BOUND) {
       cube.position = glm::normalize(cube.position) * CUBE_BOUND;
+      cubeVelocity = glm::vec3(0.0f);
+    }
     if (input.r && !input.r_pressed) {
       input.r_pressed = true;
       cube.position = cubeSpawn;
+      cubeVelocity = glm::vec3(0.0f);
     } else if (!input.r) {
       input.r_pressed = false;
     }
