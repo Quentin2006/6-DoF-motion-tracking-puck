@@ -227,12 +227,11 @@ void App::run() {
     auto &cube = registry.getTransform(0);
     cube.rotation = glm::degrees(glm::eulerAngles(deviceData.orientation));
 
-    // velocity integration: position accumulates, damping settles, bounds clamp
+    // velocity integration: position accumulates, bounds clamp (no damping)
     glm::vec3 accel = deviceData.accel;
     if (glm::length(accel) < ACCEL_DEADBAND)
       accel = glm::vec3(0.0f);  // deadband: kill rest jitter crawl
     cubeVelocity += accel * ACCEL_VELOCITY_GAIN * deltaTime;
-    cubeVelocity *= std::exp(-DAMPING_RATE * deltaTime);
     if (glm::length(cubeVelocity) > MAX_CUBE_SPEED)
       cubeVelocity = glm::normalize(cubeVelocity) * MAX_CUBE_SPEED;
     cube.position += cubeVelocity * deltaTime;

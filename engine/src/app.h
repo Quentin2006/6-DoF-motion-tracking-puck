@@ -16,8 +16,8 @@
 
 constexpr float MOVEMENT_SPEED = 15.f;
 
-constexpr float ACCEL_VELOCITY_GAIN = 3.0f;  // accel → velocity; terminal v = gain·a/damping
-constexpr float DAMPING_RATE = 1.5f;         // /s exponential velocity decay
+constexpr float ACCEL_VELOCITY_GAIN =
+    3.0f; // accel → velocity; terminal v = gain·a/damping
 constexpr float MAX_CUBE_SPEED = 20.0f;
 constexpr float CUBE_BOUND = 12.0f;
 constexpr float ACCEL_DEADBAND = 0.1f;
