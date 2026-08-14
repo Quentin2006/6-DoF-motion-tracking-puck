@@ -3,7 +3,6 @@
 
 MPU6050 mpu;
 Quaternion q;
-uint16_t packetSize;
 uint8_t fifoBuffer[64];
 
 void calibrateGyro() {
@@ -29,7 +28,6 @@ void setup() {
 
   Serial.println("Initing MPU6050...");
   mpu.initialize();
-  calibrateGyro();
 
   uint8_t err = mpu.dmpInitialize();
   if (err != 0) {
@@ -37,8 +35,8 @@ void setup() {
     Serial.println(err);
     return;
   }
+  calibrateGyro();
   mpu.setDMPEnabled(true);
-  packetSize = mpu.dmpGetFIFOPacketSize();
   Serial.println("DMP ready");
 }
 
