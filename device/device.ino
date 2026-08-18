@@ -32,14 +32,14 @@ constexpr vec3 MPU_ACCEL_REGS{0x3B, 0x3D, 0x3F};
 constexpr vec3 MPU_GYRO_REGS{0x43, 0x45, 0x47};
 
 // MPU6050 power-on defaults: ±2 g accelerometer and ±250 °/s gyroscope.
-constexpr float ACCEL_LSB_TO_MPS2 = 9.80665f / 16384.0f;
+constexpr float ACCEL_LSB_O_MPS2 = 9.80665f / 16384.0f;
 constexpr float GYRO_LSB_TO_DPS = 1.0f / 131.0f;
 
 vec3_f cur_gyro = {0, 0, 0};
 vec3_f gyro_bias = {0, 0, 0};
 unsigned long last_gyro_us = 0;
 
-constexpr size_t GYRO_CALIBRATION_SAMPLES = 100;
+constexpr size_t GYRO_CALIBRATION_SAMPLES = 1000;
 constexpr unsigned long GYRO_CALIBRATION_DELAY_MS = 5;
 
 void wake_mpu() {
@@ -67,6 +67,7 @@ float read_data(size_t registerAddress, const float scale) {
       static_cast<int16_t>((static_cast<uint16_t>(high) << 8) | low);
   return static_cast<float>(data) * scale;
 }
+
 bool read_gyro_sample(vec3_f &sample) {
   sample = {read_data(MPU_GYRO_REGS.x, GYRO_LSB_TO_DPS),
             read_data(MPU_GYRO_REGS.y, GYRO_LSB_TO_DPS),
@@ -114,8 +115,8 @@ void setup() {
 }
 
 void loop() {
-  // Gyro readings are angular velocity in deg/s; multiply by elapsed seconds
-  // to integrate a relative angle. Residual noise and bias still cause drift.
+  // Gyro readings are angular velocity in deg/s
+  // multiply by elapsed seconds to get relative angle
   vec3_f gyro_sample;
   if (read_gyro_sample(gyro_sample)) {
     const unsigned long now_us = micros();
@@ -130,5 +131,5 @@ void loop() {
     cur_gyro.z += gyro_sample.z * dt;
   }
 
-  Serial.printf("%.2f %.2f %.2f\r", cur_gyro.x, cur_gyro.y, cur_gyro.z);
+  Serial.printf("%f %f %f\n", cur_gyro.x, cur_gyro.y, cur_gyro.z);
 }
