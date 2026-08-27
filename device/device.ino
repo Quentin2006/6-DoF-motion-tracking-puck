@@ -132,9 +132,10 @@ void loop() {
   probably be overkill for what we are trying to do.
 
 
-  VQF would provide the best accuracy, but Im not choosing it. This is only due
-  to the fact this algo is very complex, and I want to finish the project.
-  So instead Im choosing the Madgwick filter due to its relative eaise to
-  implement
+  VQF would probably provide the best accuracy, but I'm not choosing it. This
+  is mainly because the algorithm is more complex, and I want to be able to
+  finish the project in a reasonable amount of time. Instead, I'm choosing the
+  Madgwick filter because it is relatively easy to implement while still
+  providing a good estimate of the device's orientation.
    */
 }
