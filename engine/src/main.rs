@@ -48,6 +48,7 @@ fn setup(
 
 // Systems can also be mutable, allowing for modification of data
 fn update(mut query: Query<&mut Transform, With<Mesh3d>>) {
+    // Jsut have to make a connection with the device, then directly update the transformations rotation
     for mut trans in &mut query {
         trans.rotation *= Quat::from_rotation_x(1. * PI / 180.)
     }
