@@ -1,4 +1,4 @@
-use std::f32::consts::PI;
+use std::{f32::consts::PI, net::UdpSocket};
 
 use bevy::prelude::*;
 
@@ -6,8 +6,8 @@ use bevy::prelude::*;
 * NOTE: Resources
 */
 // These provide global state
-// #[derive(Resource)]
-// struct GreetTimer(Timer);
+#[derive(Resource)]
+struct Socket(UdpSocket);
 
 /*
 * NOTE: Components
