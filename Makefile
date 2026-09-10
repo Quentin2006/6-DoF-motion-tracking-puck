@@ -7,9 +7,6 @@ all:
 monitor:
 	arduino-cli monitor device
 
-compile-db:
-	arduino-cli compile --only-compilation-database --build-path build device
-
 engine:
 	cd engine && make clean all run && cd ..
 
