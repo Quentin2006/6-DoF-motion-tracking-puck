@@ -1,6 +1,4 @@
-mod net;
 mod tracking;
-mod world;
 
 use bevy::prelude::*;
 

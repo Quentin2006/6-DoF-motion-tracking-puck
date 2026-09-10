@@ -8,7 +8,7 @@ monitor:
 	arduino-cli monitor device
 
 engine:
-	cd engine && make clean all run && cd ..
+	cd engine && cargo run
 
 device:
 	arduino-cli compile device

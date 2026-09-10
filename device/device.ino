@@ -20,11 +20,12 @@ void setup() {
 }
 
 void loop() {
-  static uint32_t last = 0;
+  static uint32_t next = 0;
+  static constexpr uint32_t PERIOD_US = SEND_INTERVAL_MS * 1000;
   static uint32_t sample_fails = 0;
-  uint32_t now = millis();
-  if (now - last < SEND_INTERVAL_MS) return;  // ~100 Hz cap, no UDP flood
-  last = now;
+  if (micros() < next) return;  // SEND_INTERVAL_MS grid; must match DELTA_T in madgwick.h
+  next += PERIOD_US;
+  if (micros() - next > PERIOD_US) next = micros();
   vec3 gyro, accel;
   if (!read_gyro_sample(gyro) || !read_accel_sample(accel)) {
     if (++sample_fails % 100 == 1) {
