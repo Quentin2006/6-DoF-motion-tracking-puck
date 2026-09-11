@@ -1,40 +1,56 @@
 #include <Arduino.h>
+#include <WiFi.h>
+#include <WiFiUdp.h>
 
 #include "config.h"
-#include "fusion.h"
 #include "imu.h"
-#include "net.h"
 #include "proto.h"
 
-Quat data{ 0, 0, 0, 1 };
+void fusion_init();
+void fusion_calibrate();
+void fusion_update();
+Quat fusion_quat();
+
+static WiFiUDP udp;
 
 void setup() {
   Serial.begin(115200);
   Serial.flush();
   imu_init();
   Serial.println("Mpu awake");
-  fusion_calibrate();
   fusion_init();
+  fusion_calibrate();
   net_connect();
   Serial.println("UDP ready");
 }
 
 void loop() {
-  static uint32_t next = 0;
-  static constexpr uint32_t PERIOD_US = SEND_INTERVAL_MS * 1000;
-  static uint32_t sample_fails = 0;
-  if (micros() < next) return;  // SEND_INTERVAL_MS grid; must match DELTA_T in madgwick.h
-  next += PERIOD_US;
-  if (micros() - next > PERIOD_US) next = micros();
-  vec3 gyro, accel;
-  if (!read_gyro_sample(gyro) || !read_accel_sample(accel)) {
-    if (++sample_fails % 100 == 1) {
-      Serial.print("IMU read failed x");
-      Serial.println(sample_fails);
-    }
-  } else {
-    fusion_update(gyro, accel);
-    data = fusion_quat();
+  fusion_update();
+  const Quat q = fusion_quat();
+  net_send_quat(q);
+}
+
+void net_connect() {
+  WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.begin(ssid, pwd);
+  Serial.println("");
+  Serial.print("Connecting to ");
+  Serial.println(ssid);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
   }
-  net_send_quat(data);
+  Serial.println("");
+  Serial.print("Connected to ");
+  Serial.println(ssid);
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+}
+
+void net_send_quat(const Quat &q) {
+  udp.beginPacket(UDP_DEST, UDP_PORT);
+  udp.write(reinterpret_cast<const uint8_t *>(&q), QUAT_PACKET_SIZE);
+  udp.endPacket();
 }

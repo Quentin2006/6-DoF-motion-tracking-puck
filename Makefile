@@ -1,16 +1,11 @@
-.PHONY: all compile-db engine device
-all:
+.PHONY: all compile upload monitor engine device
+all: compile upload engine
+compile:
 	arduino-cli compile device
+upload:
 	arduino-cli upload device
-	make engine
-
 monitor:
 	arduino-cli monitor device
-
+device: compile upload monitor
 engine:
 	cd engine && cargo run
-
-device:
-	arduino-cli compile device
-	arduino-cli upload device
-	arduino-cli monitor device

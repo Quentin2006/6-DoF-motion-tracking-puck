@@ -15,48 +15,52 @@ static void write_reg(uint8_t reg, uint8_t val) {
 }
 
 static void wake_mpu() {
-  write_reg(MPU_PWR_MGMT_1_REG, 0x00);  // Wake the MPU6050.
+  write_reg(MPU_PWR_MGMT_1_REG, 0x00); // Wake the MPU6050.
 }
 
-static float read_data(size_t registerAddress, const float scale) {
+static bool read_burst(uint8_t base, int16_t out[3]) {
   Wire.beginTransmission(MPU_ADDR);
-  Wire.write(registerAddress);
+  Wire.write(base);
   if (Wire.endTransmission(false) != 0) {
-    return NAN;
+    return false;
   }
-
-  if (Wire.requestFrom(MPU_ADDR, 2) != 2) {
-    return NAN;
+  if (Wire.requestFrom(MPU_ADDR, 6) != 6) {
+    return false;
   }
-
-  const uint8_t high = Wire.read();
-  const uint8_t low = Wire.read();
-
-  const int16_t data =
-    static_cast<int16_t>((static_cast<uint16_t>(high) << 8) | low);
-  return static_cast<float>(data) * scale;
-}
-
-static bool read_triplet(vec3 &sample, vec3 regs, float scale) {
-  sample = { read_data(regs.x, scale),
-             read_data(regs.y, scale),
-             read_data(regs.z, scale) };
-  return !isnan(sample.x) && !isnan(sample.y) && !isnan(sample.z);
+  for (int i = 0; i < 3; ++i) {
+    const uint8_t high = Wire.read();
+    const uint8_t low = Wire.read();
+    out[i] = static_cast<int16_t>((static_cast<uint16_t>(high) << 8) | low);
+  }
+  return true;
 }
 
 bool read_gyro_sample(vec3 &sample) {
-  return read_triplet(sample, MPU_GYRO_REGS, GYRO_LSB_TO_DPS);
+  int16_t raw[3];
+  if (!read_burst(MPU_GYRO_BASE, raw)) {
+    return false;
+  }
+  sample = {raw[0] * GYRO_LSB_TO_DPS, raw[1] * GYRO_LSB_TO_DPS,
+            raw[2] * GYRO_LSB_TO_DPS};
+  return true;
 }
 
 bool read_accel_sample(vec3 &sample) {
-  return read_triplet(sample, MPU_ACCEL_REGS, ACCEL_LSB_O_MPS2);
+  int16_t raw[3];
+  if (!read_burst(MPU_ACCEL_BASE, raw)) {
+    return false;
+  }
+  sample = {raw[0] * ACCEL_LSB_O_MPS2, raw[1] * ACCEL_LSB_O_MPS2,
+            raw[2] * ACCEL_LSB_O_MPS2};
+  return true;
 }
 
 void imu_init() {
   Wire.begin(SDA_PIN, SCL_PIN);
   delay(100);
   wake_mpu();
-  // ~100 Hz internal rate (1 kHz / (1 + 9)) with DLPF ~42 Hz gyro / 44 Hz accel.
+  // ~100 Hz internal rate (1 kHz / (1 + 9)) with DLPF ~42 Hz gyro / 44 Hz
+  // accel.
   write_reg(SMPRT_DIV_REG, 9);
   write_reg(CONFIG_REG, 0x03);
 }
