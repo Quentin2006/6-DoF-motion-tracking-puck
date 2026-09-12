@@ -17,6 +17,15 @@ void setup() {
   Serial.begin(115200);
   Serial.flush();
   imu_init();
+  if (!imu_self_test()) {
+    Serial.println("MPU6050 not found");
+    for (;;) {
+      neopixelWrite(RGB_LED_PIN, 255, 0, 0);
+      delay(250);
+      neopixelWrite(RGB_LED_PIN, 0, 0, 0);
+      delay(250);
+    }
+  }
   Serial.println("Mpu awake");
   fusion_init();
   fusion_calibrate();
