@@ -1,6 +1,6 @@
 // Vendored from https://github.com/bjohnsonfl/Madgwick_Filter (MIT License,
 // Copyright (c) Blake Johnson). Filter body unchanged except imu_filter
-// takes the measured sample interval instead of the fixed DELTA_T.
+// takes the fixed sample interval from the 100 Hz scheduler.
 
 #include "madgwick.h"
 
@@ -21,10 +21,10 @@ struct quaternion quat_mult(struct quaternion L, struct quaternion R) {
 // Accelerometer components will be normalized.
 void imu_filter(float ax, float ay, float az, float gx, float gy, float gz,
                 float dt) {
+  if (!isfinite(ax + ay + az + gx + gy + gz) || dt <= 0 || !isfinite(dt))
+    return; // NaN input or bogus interval: keep last estimate
   // Variables and constants
   struct quaternion q_est_prev = q_est;
-  struct quaternion q_est_dot = {0}; // placeholder for equations 42 and 43
-  struct quaternion q_a = {0, ax, ay, az}; // equation (24), normalized below
 
   float F_g[3] = {0};    // equation (15/21/25) objective function
   float J_g[3][4] = {0}; // Jacobian matrix
@@ -43,6 +43,8 @@ void imu_filter(float ax, float ay, float az, float gx, float gy, float gz,
 
   /* Gradient = J_g' * F_g (equation 20), hard-coded transpose. */
   quat_Normalization(&q_a);
+  if (!isfinite(q_a.q1))
+    return; // degenerate accel (all zeros): keep last estimate
   // Objective function for gravity, eq. (15) simplified to eq. (25).
   F_g[0] = 2 * (q_est_prev.q2 * q_est_prev.q4 - q_est_prev.q1 * q_est_prev.q3) -
            q_a.q2;

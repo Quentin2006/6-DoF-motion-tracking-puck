@@ -1,7 +1,7 @@
 // Vendored from https://github.com/bjohnsonfl/Madgwick_Filter (MIT License,
 // Copyright (c) Blake Johnson). Adapted for Arduino/ESP32: dropped the
 // stdio debug helper and the unused Euler-angle helper, and imu_filter takes
-// the measured sample interval (the loop free-spins; no fixed rate exists).
+// the fixed sample interval from the 100 Hz scheduler.
 
 #ifndef MADGWICK_FILTER_H
 #define MADGWICK_FILTER_H
@@ -65,9 +65,12 @@ static inline float quat_Norm(struct quaternion q) {
   return sqrt(q.q1 * q.q1 + q.q2 * q.q2 + q.q3 * q.q3 + q.q4 * q.q4);
 }
 
-// Normalizes *q in place.
+// Normalizes *q in place. No-op on zero/NaN input: dividing would spread
+// NaN into the estimate and poison every future sample.
 static inline void quat_Normalization(struct quaternion *q) {
   float norm = quat_Norm(*q);
+  if (!isfinite(norm) || norm < 1e-9f)
+    return;
   q->q1 /= norm;
   q->q2 /= norm;
   q->q3 /= norm;
@@ -76,7 +79,7 @@ static inline void quat_Normalization(struct quaternion *q) {
 
 // IMU (gyro + accel) sensor fusion. Result accumulates in q_est.
 // Gyro components in radians per second; accel is normalized internally.
-// dt is the measured sample interval in seconds.
+// dt is the fixed sample interval in seconds (100 Hz scheduler).
 void imu_filter(float ax, float ay, float az, float gx, float gy, float gz,
                 float dt);
 

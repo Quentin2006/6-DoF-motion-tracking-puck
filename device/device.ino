@@ -3,13 +3,9 @@
 #include <WiFiUdp.h>
 
 #include "config.h"
+#include "fusion.h"
 #include "imu.h"
 #include "proto.h"
-
-void fusion_init();
-void fusion_calibrate();
-void fusion_update();
-Quat fusion_quat();
 
 static WiFiUDP udp;
 
