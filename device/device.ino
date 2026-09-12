@@ -26,8 +26,12 @@ void setup() {
 
 void loop() {
   fusion_update();
-  const Quat q = fusion_quat();
-  net_send_quat(q);
+  static uint32_t pkt_seq = 0;
+  QuatPacket pkt;
+  pkt.seq = pkt_seq++;
+  pkt.micros = micros();
+  pkt.quat = fusion_quat();
+  net_send_quat(pkt);
 }
 
 void net_connect() {
@@ -49,8 +53,8 @@ void net_connect() {
   Serial.println(WiFi.localIP());
 }
 
-void net_send_quat(const Quat &q) {
+void net_send_quat(const QuatPacket &pkt) {
   udp.beginPacket(UDP_DEST, UDP_PORT);
-  udp.write(reinterpret_cast<const uint8_t *>(&q), QUAT_PACKET_SIZE);
+  udp.write(reinterpret_cast<const uint8_t *>(&pkt), sizeof(QuatPacket));
   udp.endPacket();
 }

@@ -10,5 +10,11 @@ struct Quat {
   float w;
 };
 
-constexpr size_t QUAT_PACKET_SIZE = 16;
-static_assert(sizeof(Quat) == 16, "Quat wire format must be 16 bytes");
+struct QuatPacket {
+  uint32_t seq;
+  uint32_t micros;
+  Quat quat;
+};
+
+constexpr size_t QUAT_PACKET_SIZE = 24;
+static_assert(sizeof(QuatPacket) == 24, "wire must be 24 bytes");

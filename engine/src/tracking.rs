@@ -11,8 +11,8 @@ struct Puck;
 // must match device/config.h UDP_PORT
 const UDP_PORT: u16 = 3333;
 const BIND_HOST: &str = "0.0.0.0";
-// must match QUAT_PACKET_SIZE
-const PACKET_SIZE: usize = 16;
+// must match QUAT_PACKET_SIZE (seq + micros + xyzw)
+const PACKET_SIZE: usize = 24;
 
 pub struct CubePlugin;
 
@@ -30,21 +30,36 @@ fn setup_socket(mut commands: Commands) {
     commands.insert_resource(Socket(udp));
 }
 
-fn parse_quat(raw: [u8; PACKET_SIZE]) -> Quat {
+fn parse_packet(raw: [u8; PACKET_SIZE]) -> (u32, u32, Quat) {
+    let seq = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+    let stamp = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);
     let f = |i: usize| f32::from_le_bytes([raw[i], raw[i + 1], raw[i + 2], raw[i + 3]]);
-    Quat::from_xyzw(f(0), f(4), f(8), f(12))
+    (seq, stamp, Quat::from_xyzw(f(8), f(12), f(16), f(20)))
 }
 
-fn update(query: Single<&mut Transform, With<Puck>>, socket: Res<Socket>) {
-    // Drain to latest: 16-byte LE xyzw packet, ESP32 and x86 are both LE
+fn update(
+    query: Single<&mut Transform, With<Puck>>,
+    socket: Res<Socket>,
+    mut last_seq: Local<Option<u32>>,
+) {
+    // Drain to latest: 24-byte LE seq+stamp+xyzw packet, ESP32 and x86 both LE
     let mut buf = [0u8; PACKET_SIZE];
-    let mut latest: Option<Quat> = None;
+    let mut latest: Option<(u32, u32, Quat)> = None;
 
     while let Ok(PACKET_SIZE) = socket.0.recv(&mut buf) {
-        latest = Some(parse_quat(buf));
+        latest = Some(parse_packet(buf));
     }
 
-    if let Some(q) = latest {
+    if let Some((seq, _stamp, q)) = latest {
+        if let Some(prev) = *last_seq {
+            if seq != prev.wrapping_add(1) {
+                println!(
+                    "seq gap: prev {prev} got {seq} (lost {})",
+                    seq.wrapping_sub(prev.wrapping_add(1))
+                );
+            }
+        }
+        *last_seq = Some(seq);
         query.into_inner().rotation = q;
     }
 }
