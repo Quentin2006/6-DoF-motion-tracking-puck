@@ -79,7 +79,7 @@ void imu_filter(float ax, float ay, float az, float gx, float gy, float gz,
   quat_Normalization(&gradient);
 
   /* Sensor fusion, equations 42-44: gyro rate minus beta-scaled gradient,
-     integrated over the measured sample interval. */
+     integrated over the fixed sample interval. */
   quat_scalar(&gradient, BETA);
   quat_sub(&q_est_dot, q_w, gradient);
   quat_scalar(&q_est_dot, dt);
