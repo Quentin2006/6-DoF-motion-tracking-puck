@@ -1,9 +1,6 @@
 #include "mpu6050.h"
 #include "config.h"
 
-static constexpr uint8_t SMPRT_DIV_REG = 0x19;
-static constexpr uint8_t CONFIG_REG = 0x1A;
-
 Mpu6050::Mpu6050()
     : addr(MPU_ADDR), sda(SDA_PIN), scl(SCL_PIN), mpu_gyro_base(MPU_GYRO_BASE),
       mpu_accel_base(MPU_ACCEL_BASE) {
