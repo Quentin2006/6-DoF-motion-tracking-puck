@@ -19,14 +19,4 @@ constexpr float GRAVITY_MPS2 = 9.80665f;
 constexpr const char *ssid = WIFI_SSID;
 constexpr const char *pwd = WIFI_PASSWORD;
 
-// UDP destination: unicast to the engine host (broadcast jittered badly).
-constexpr const char *UDP_DEST = "192.168.0.233";
-// must match engine UDP_PORT
-constexpr uint16_t UDP_PORT = 3333;
-
-constexpr int GYRO_CALIB_SAMPLES = 1000;
-#ifdef RGB_BUILTIN
-constexpr int RGB_LED_PIN = RGB_BUILTIN;
-#else
-constexpr int RGB_LED_PIN = 48; // onboard WS2812 on most S3 boards
-#endif
+constexpr int GYRO_CALIB_SAMPLES = 100;
