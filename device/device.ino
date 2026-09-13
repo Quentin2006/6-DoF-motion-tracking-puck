@@ -12,7 +12,10 @@ void setup() {
 }
 
 void loop() {
-  // vec3 gyro;
-  // mpu.readGyro(gyro);
-  // Serial.printf("gyro: %f, %f, %f\n", gyro.x, gyro.y, gyro.z);
+  vec3 gyro, accel;
+  mpu.readGyro(gyro);
+  mpu.readAccel(accel);
+  Serial.printf("gyro: %f, %f, %f\n", gyro.x, gyro.y, gyro.z);
+  Serial.printf("accel: %f, %f, %f\n", accel.x, accel.y, accel.z);
+  delay(1000);
 }

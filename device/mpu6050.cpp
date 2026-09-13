@@ -1,5 +1,4 @@
 #include "mpu6050.h"
-#include "HardwareSerial.h"
 #include "config.h"
 
 Mpu6050::Mpu6050()
@@ -52,16 +51,12 @@ void Mpu6050::getGyroBias(int samples) {
   for (int i = 0; i < samples; ++i) {
     delay(5);
     readGyro(cur_sample);
-    Serial.printf("GYRO SAMPLE: %f, %f, %f\n", cur_sample.x, cur_sample.y,
-                  cur_sample.z);
     running_total += cur_sample;
   }
 
   running_total /= static_cast<float>(samples);
 
   gyro_bias = running_total;
-  Serial.printf("GYRO calibration complete: bias %.4f %.4f %.4f deg/s\n",
-                gyro_bias.x, gyro_bias.y, gyro_bias.z);
 }
 
 void Mpu6050::getAccelBias(int samples) {
@@ -74,14 +69,11 @@ void Mpu6050::getAccelBias(int samples) {
     delay(5);
     readAccel(cur_sample);
     running_total += cur_sample;
-    // Serial.printf(running_total);
   }
 
   running_total /= static_cast<float>(samples);
 
   accel_bias = running_total;
-  Serial.printf("ACCEL calibration complete: bias %.4f %.4f %.4f deg/s\n",
-                accel_bias.x, accel_bias.y, accel_bias.z);
 }
 
 float Mpu6050::read_data(size_t registerAddress, float scale) {
