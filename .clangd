@@ -1,9 +1,5 @@
 CompileFlags:
-  CompilationDatabase: build/
-  Remove:
-    - -mlongcalls
-    - -mdisable-hardware-atomics
-    - -fstrict-volatile-bitfields
-    - -fno-tree-switch-conversion
-  Add:
-    - -D__GLIBC_USE(x)=1
+  Remove: [-m*, -f*]
+
+Diagnostics:
+  Suppress: [pp_file_not_found]

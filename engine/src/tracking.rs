@@ -71,7 +71,7 @@ fn setup_world(
 ) {
     commands.spawn((
         Puck,
-        Mesh3d(meshes.add(Cuboid::new(1.0, 1.0, 1.0))),
+        Mesh3d(meshes.add(Cuboid::new(2.9 / 2., 0.1 / 2., 5.7 / 2.))),
         MeshMaterial3d(materials.add(Color::srgb(0.3, 0.5, 0.8))),
         Transform::from_xyz(0.0, 0.5, 0.0),
     ));
