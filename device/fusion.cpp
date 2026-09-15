@@ -111,8 +111,9 @@ bool Ekf6Dof::updateAccel(float ax, float ay, float az) {
   if (n == 0) {
     return false;
   }
-  // Gate 1: linear-accel/shake -> coast on gyro.
-  if (fabsf(n - GRAVITY_MPS2) / GRAVITY_MPS2 > EKF_GATE_NORM) {
+  const float normDev = fabsf(n - GRAVITY_MPS2) / GRAVITY_MPS2;
+  // Gate 1: far reject only -> coast on gyro; soft R deweight handles the rest below.
+  if (normDev > EKF_GATE_NORM_FAR) {
     return false;
   }
 
@@ -152,7 +153,8 @@ bool Ekf6Dof::updateAccel(float ax, float ay, float az) {
       HP[i][j] = s;
     }
   }
-  const float ra = EKF_SIGMA_ACCEL * EKF_SIGMA_ACCEL;
+  float r = normDev / EKF_GATE_NORM;
+  float ra = EKF_SIGMA_ACCEL * EKF_SIGMA_ACCEL * (1.0f + 10.0f * r * r);
   float S[3][3] = {0};
   for (int i = 0; i < 3; ++i) {
     for (int j = 0; j < 3; ++j) {
@@ -244,27 +246,41 @@ bool Ekf6Dof::updateAccel(float ax, float ay, float az) {
       q3_ = r3 / rn;
     }
   }
-  bg_[0] += dx[3];
-  bg_[1] += dx[4];
-  bg_[2] += dx[5];
+  // Bias unobservable when the correction is dominated by linear accel: freeze bg there.
+  if (maha < 0.75f * EKF_GATE_MAHA) {
+    bg_[0] += dx[3];
+    bg_[1] += dx[4];
+    bg_[2] += dx[5];
+  }
 
-  // P = (I_6 - K*H)*P.
-  float KH[6][6] = {0};
+  // Joseph form: P = (I-KH)*P*(I-KH)' + K*R*K', R = ra*I_3.
+  float IKH[6][6] = {0};
   for (int i = 0; i < 6; ++i) {
     for (int j = 0; j < 3; ++j) {
       float s = 0;
       for (int k = 0; k < 3; ++k) {
         s += K[i][k] * Hs[k][j];
       }
-      KH[i][j] = s;
+      IKH[i][j] = -s;
+    }
+    IKH[i][i] += 1.0f;
+  }
+  float T[6][6] = {0};
+  for (int i = 0; i < 6; ++i) {
+    for (int j = 0; j < 6; ++j) {
+      float s = 0;
+      for (int l = 0; l < 6; ++l) {
+        s += IKH[i][l] * P_[l][j];
+      }
+      T[i][j] = s;
     }
   }
   float Pn[6][6] = {0};
   for (int i = 0; i < 6; ++i) {
     for (int j = 0; j < 6; ++j) {
-      float s = P_[i][j];
+      float s = ra * (K[i][0] * K[j][0] + K[i][1] * K[j][1] + K[i][2] * K[j][2]);
       for (int l = 0; l < 6; ++l) {
-        s -= KH[i][l] * P_[l][j];
+        s += T[i][l] * IKH[j][l];
       }
       Pn[i][j] = s;
     }
@@ -288,4 +304,12 @@ void Ekf6Dof::getBias(float &x, float &y, float &z) const {
   x = bg_[0];
   y = bg_[1];
   z = bg_[2];
+}
+
+void Ekf6Dof::clampBiasCovariance(float maxVar) {
+  for (int i = 3; i < 6; ++i) {
+    if (P_[i][i] > maxVar) {
+      P_[i][i] = maxVar;
+    }
+  }
 }
