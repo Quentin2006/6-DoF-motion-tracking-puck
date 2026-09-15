@@ -13,6 +13,8 @@ uint32_t pktSeq = 0;
 unsigned long tick = 0;
 unsigned long lastStatusMs = 0;
 unsigned long lastTickUs = 0;
+unsigned long overruns_ = 0;
+unsigned gated_ = 0;
 
 static inline float selAxis(int8_t m, float x, float y, float z) {
   float v = (m == 1 || m == -1) ? x : ((m == 2 || m == -2) ? y : z);
@@ -37,6 +39,9 @@ void setup() {
       delay(100);
     }
   }
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(WIFI_PS_NONE); // modem-sleep off: kills 10-100ms jitter bursts
+  WiFi.setAutoReconnect(true);
   WiFi.begin(ssid, pwd);
   unsigned long wifiStart = millis();
   while (WiFi.status() != WL_CONNECTED) {
@@ -67,6 +72,7 @@ void loop() {
   unsigned long nowTick = micros();
   if ((unsigned long)(nowTick - lastTickUs) > 2 * period) {
     lastTickUs = nowTick;
+    overruns_++;
     return;
   }
   if ((unsigned long)(nowTick - lastTickUs) < period) {
@@ -88,7 +94,10 @@ void loop() {
   float baz = selAxis(FUSION_AXIS_MAP[2], accel.x, accel.y, accel.z);
   const float dt = 1.0f / (float)FUSION_RATE_HZ;
   ekf.predict(bgx * DPS_TO_RPS, bgy * DPS_TO_RPS, bgz * DPS_TO_RPS, dt);
-  ekf.updateAccel(bax, bay, baz);
+  bool accAccepted = ekf.updateAccel(bax, bay, baz);
+  if (!accAccepted) {
+    gated_++;
+  }
   float ex, ey, ez, ew;
   ekf.getQuat(ex, ey, ez, ew);
   // Display quat: q_disp = QW_ALIGN * q_ekf * QB_ALIGN.
@@ -118,6 +127,8 @@ void loop() {
   unsigned long nowMs = millis();
   if ((unsigned long)(nowMs - lastStatusMs) >= 1000UL) {
     lastStatusMs = nowMs;
+    float bbx, bby, bbz;
+    ekf.getBias(bbx, bby, bbz);
     Serial.print("q ");
     Serial.print(qx, 4);
     Serial.print(' ');
@@ -126,7 +137,20 @@ void loop() {
     Serial.print(qz, 4);
     Serial.print(' ');
     Serial.print(qw, 4);
+    Serial.print(" seq ");
+    Serial.print(pktSeq);
+    Serial.print(" tick ");
+    Serial.print(tick);
+    Serial.print(" over ");
+    Serial.print(overruns_);
+    Serial.print(" gate ");
+    Serial.print(gated_);
+    Serial.print(" bg ");
+    Serial.print(bbx, 6);
     Serial.print(' ');
-    Serial.println(pktSeq);
+    Serial.print(bby, 6);
+    Serial.print(' ');
+    Serial.println(bbz, 6);
+    gated_ = 0;
   }
 }

@@ -283,3 +283,9 @@ void Ekf6Dof::getQuat(float &x, float &y, float &z, float &w) const {
   z = q3_;
   w = q0_;
 }
+
+void Ekf6Dof::getBias(float &x, float &y, float &z) const {
+  x = bg_[0];
+  y = bg_[1];
+  z = bg_[2];
+}
