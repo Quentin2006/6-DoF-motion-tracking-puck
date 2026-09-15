@@ -13,6 +13,7 @@ public:
   bool updateAccel(float ax, float ay, float az);
   void getQuat(float &x, float &y, float &z, float &w) const;
   void getBias(float &x, float &y, float &z) const;
+  void clampBiasCovariance(float maxVar);
 
 private:
   float q0_ = 1, q1_ = 0, q2_ = 0, q3_ = 0; // (w,x,y,z)
