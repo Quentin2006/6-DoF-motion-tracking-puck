@@ -23,7 +23,6 @@ constexpr uint8_t MPU_CONFIG_VAL = 0x01;       // DLPF 184 Hz gyro / 188 Hz acce
 constexpr uint8_t MPU_GYRO_CONFIG_VAL = 0x18;  // FS_SEL=3 → ±2000 dps
 constexpr uint8_t MPU_ACCEL_CONFIG_VAL = 0x10; // AFS_SEL=2 → ±8 g
 constexpr int MPU_CALIB_DELAY_MS = 5;
-constexpr uint8_t MPU_I2C_TIMEOUT_MS = 50;
 constexpr int GYRO_CALIB_SAMPLES = 200; // ±2000dps noise floor is 8x the old ±250dps scale
 constexpr float ACCEL_LSB_O_MPS2 = 9.80665f / 4096.0f; // ±8 g
 constexpr float GYRO_LSB_TO_DPS = 1.0f / 16.4f;         // ±2000 dps

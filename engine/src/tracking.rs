@@ -41,18 +41,24 @@ fn f(raw: &[u8], i: usize) -> f32 {
     f32::from_le_bytes([raw[i], raw[i + 1], raw[i + 2], raw[i + 3]])
 }
 
-fn parse_v1(raw: [u8; PACKET_LEN_V1]) -> (u32, u32, Quat) {
-    let seq = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
-    let stamp = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);
-    (seq, stamp, Quat::from_xyzw(f(&raw, 8), f(&raw, 12), f(&raw, 16), f(&raw, 20)))
+#[inline]
+fn header(raw: &[u8]) -> (u32, u32) {
+    (
+        u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]),
+        u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]),
+    )
 }
 
-fn parse_v2(raw: [u8; PACKET_LEN_V2]) -> (u32, u32, Quat, Vec3) {
-    let seq = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
-    let stamp = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);
-    let q = Quat::from_xyzw(f(&raw, 8), f(&raw, 12), f(&raw, 16), f(&raw, 20));
+fn parse_v1(raw: &[u8]) -> (u32, u32, Quat) {
+    let (seq, stamp) = header(raw);
+    (seq, stamp, Quat::from_xyzw(f(raw, 8), f(raw, 12), f(raw, 16), f(raw, 20)))
+}
+
+fn parse_v2(raw: &[u8]) -> (u32, u32, Quat, Vec3) {
+    let (seq, stamp) = header(raw);
+    let q = Quat::from_xyzw(f(raw, 8), f(raw, 12), f(raw, 16), f(raw, 20));
     // Body-frame gyro rad/s.
-    let gyro = Vec3::new(f(&raw, 24), f(&raw, 28), f(&raw, 32));
+    let gyro = Vec3::new(f(raw, 24), f(raw, 28), f(raw, 32));
     (seq, stamp, q, gyro)
 }
 
@@ -60,7 +66,6 @@ fn update(
     query: Single<&mut Transform, With<Puck>>,
     socket: Res<Socket>,
     mut last_seq: Local<Option<u32>>,
-    mut last_gyro: Local<Option<Vec3>>,
     mut last_applied: Local<Option<Quat>>,
     time: Res<Time>,
 ) {
@@ -71,14 +76,11 @@ fn update(
     while let Ok(n) = socket.0.recv(&mut buf) {
         match n {
             PACKET_LEN_V1 => {
-                let v1: [u8; PACKET_LEN_V1] = buf[..PACKET_LEN_V1]
-                    .try_into()
-                    .expect("slice len matches V1");
-                let (seq, stamp, q) = parse_v1(v1);
+                let (seq, stamp, q) = parse_v1(&buf[..PACKET_LEN_V1]);
                 latest = Some((seq, stamp, q, None));
             }
             PACKET_LEN_V2 => {
-                let (seq, stamp, q, gyro) = parse_v2(buf);
+                let (seq, stamp, q, gyro) = parse_v2(&buf);
                 latest = Some((seq, stamp, q, Some(gyro)));
             }
             _ => {}
@@ -88,12 +90,9 @@ fn update(
     if let Some((seq, _stamp, q, gyro)) = latest {
         if let Some(prev) = *last_seq {
             // Drain-to-latest normally skips ~4 packets/frame at 250Hz/60fps — not loss; threshold 25 (~100ms) flags real bursts only.
-            let skipped = seq.wrapping_sub(prev.wrapping_add(1));
-            if skipped > 25 {
-                println!(
-                    "seq gap: prev {prev} got {seq} (lost {})",
-                    seq.wrapping_sub(prev.wrapping_add(1))
-                );
+            let lost = seq.wrapping_sub(prev.wrapping_add(1));
+            if lost > 25 {
+                println!("seq gap: prev {prev} got {seq} (lost {lost})");
             }
         }
         *last_seq = Some(seq);
