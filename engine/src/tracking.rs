@@ -51,7 +51,11 @@ fn header(raw: &[u8]) -> (u32, u32) {
 
 fn parse_v1(raw: &[u8]) -> (u32, u32, Quat) {
     let (seq, stamp) = header(raw);
-    (seq, stamp, Quat::from_xyzw(f(raw, 8), f(raw, 12), f(raw, 16), f(raw, 20)))
+    (
+        seq,
+        stamp,
+        Quat::from_xyzw(f(raw, 8), f(raw, 12), f(raw, 16), f(raw, 20)),
+    )
 }
 
 fn parse_v2(raw: &[u8]) -> (u32, u32, Quat, Vec3) {
@@ -96,14 +100,10 @@ fn update(
             }
         }
         *last_seq = Some(seq);
-        // Only overwrite when the packet carried gyro (v2).
-        if let Some(w) = gyro {
-            *last_gyro = Some(w);
-        }
 
         // Predict forward by PREDICT_TAU_S in the body frame (right-multiply).
         // Legacy v1 packets carry no gyro, so they skip prediction.
-        let q_show = match gyro {
+        let unnorm = match gyro {
             Some(w) => {
                 let ang = w.length() * PREDICT_TAU_S;
                 if ang > 1e-6 {
@@ -115,12 +115,12 @@ fn update(
             None => q,
         };
 
-        let dt_render = time.delta_secs();
-        let alpha = (1.0 - (-dt_render / SMOOTH_TAU_S).exp()).clamp(0.0, 1.0);
+        let alpha = (1.0 - (-time.delta_secs() / SMOOTH_TAU_S).exp()).clamp(0.0, 1.0);
         let q_out = match *last_applied {
-            Some(p) => p.slerp(q_show, alpha).normalize(),
-            None => q_show.normalize(),
-        };
+            Some(p) => p.slerp(unnorm, alpha),
+            None => unnorm,
+        }
+        .normalize();
 
         query.into_inner().rotation = q_out;
         *last_applied = Some(q_out);
