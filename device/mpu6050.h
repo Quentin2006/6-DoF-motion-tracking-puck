@@ -22,10 +22,6 @@ struct vec3 {
     return *this;
   }
 
-  bool operator==(const vec3 &rhs) const {
-    return this->x == rhs.x && this->y == rhs.y && this->z == rhs.z;
-  }
-
   vec3 &operator/=(const float rhs) {
     this->x /= rhs;
     this->y /= rhs;
@@ -48,13 +44,13 @@ public:
 
   void setAccelCal(const float off[3], const float scale[3]); // persist to NVS
   void getAccelCal(float off[3], float scale[3]) const;
-  void loadAccelCal();      // NVS namespace `mpu`, identity defaults
-  void saveAccelCal() const;
   void nudgeGyroBias(float mx, float my, float mz, float alpha); // still-detect re-bias, no I2C
 
 private:
   bool writeReg(uint8_t reg, uint8_t val);
   bool readBurst6(uint8_t baseReg, float scale, vec3 &out);
+  void loadAccelCal();      // NVS namespace `mpu`, identity defaults
+  void saveAccelCal() const;
 
   uint8_t addr;
   int sda, scl;

@@ -26,8 +26,6 @@ static const float STILL_EXIT_DPS = 1.5f;        // single-tick |omega| exit
 static const float STILL_EXIT_NORM = 0.03f;      // single-tick norm-dev exit
 static const unsigned STILL_COOLDOWN = 25;
 
-// Driver->body remap; single source for the axis convention.
-static inline float selAxis(int8_t m, float x, float y, float z);
 static float stillRing[STILL_WIN_TICKS][3];
 static float stillNormRing[STILL_WIN_TICKS];
 static float stillSum[3] = {0.0f, 0.0f, 0.0f};
@@ -85,27 +83,16 @@ static inline bool stillWindowCalm() {
   return dev < STILL_NORM_DEV;
 }
 
-// Driver-frame gyro residual from the still window, routed through the
-// forward FUSION_AXIS_MAP (driver->body) and back via the inverse map
-// (body->driver) so the remap convention stays single-sourced. The
-// round-trip equals the driver mean; the explicit inverse documents intent.
+// Driver-frame gyro residual from the still window: direct window mean.
+// The window stores driver-frame gyro (push sites pass gyro.x/y/z
+// pre-remap) and nudgeGyroBias expects driver-frame bias, so no remap
+// round-trip is needed.
 static inline vec3 stillDriverResidDps() {
   const float inv = 1.0f / (float)STILL_WIN_TICKS;
-  float md[3] = {stillSum[0] * inv, stillSum[1] * inv, stillSum[2] * inv};
-  float mb[3];
-  for (int b = 0; b < 3; ++b) {
-    mb[b] = selAxis(FUSION_AXIS_MAP[b], md[0], md[1], md[2]);
-  }
-  float r[3] = {0, 0, 0};
-  for (int b = 0; b < 3; ++b) {
-    int8_t m = FUSION_AXIS_MAP[b];
-    int d = (m == 1 || m == -1) ? 0 : ((m == 2 || m == -2) ? 1 : 2);
-    r[d] = (m < 0 ? -mb[b] : mb[b]); // inverse-map: driver[d] = sign * body[b]
-  }
   vec3 out;
-  out.x = r[0];
-  out.y = r[1];
-  out.z = r[2];
+  out.x = stillSum[0] * inv;
+  out.y = stillSum[1] * inv;
+  out.z = stillSum[2] * inv;
   return out;
 }
 
@@ -148,6 +135,7 @@ static bool waitSerialLine(String &line, unsigned long timeoutMs) {
   return line.length() > 0;
 }
 
+// Driver->body remap; single source for the axis convention.
 static inline float selAxis(int8_t m, float x, float y, float z) {
   float v = (m == 1 || m == -1) ? x : ((m == 2 || m == -2) ? y : z);
   return m < 0 ? -v : v;
@@ -160,9 +148,6 @@ static inline void quatMul(float ax, float ay, float az, float aw,
   oy = aw * by - ax * bz + ay * bw + az * bx;
   oz = aw * bz + ax * by - ay * bx + az * bw;
   ow = aw * bw - ax * bx - ay * by - az * bz;
-}
-static inline float compOf(const vec3 &v, int i) {
-  return i == 0 ? v.x : (i == 1 ? v.y : v.z);
 }
 
 // One-time serial-guided 6-point accel cal. Blocking, setup-time only.
@@ -208,8 +193,10 @@ static void runCal6() {
   }
   float off[3], scale[3];
   for (int i = 0; i < 3; ++i) {
-    float a = compOf(means[2 * i], i);
-    float b = compOf(means[2 * i + 1], i);
+    const vec3 &pa = means[2 * i];
+    const vec3 &pb = means[2 * i + 1];
+    float a = i == 0 ? pa.x : (i == 1 ? pa.y : pa.z);
+    float b = i == 0 ? pb.x : (i == 1 ? pb.y : pb.z);
     float mx = a > b ? a : b;
     float mn = a < b ? a : b;
     if ((mx - mn) < 1e-6f) {
@@ -332,23 +319,25 @@ void loop() {
   float bnorm = sqrtf(bax * bax + bay * bay + baz * baz);
   float omegaMag = sqrtf(bgx * bgx + bgy * bgy + bgz * bgz);
   float normDevTick = fabsf(bnorm - GRAVITY_MPS2) / GRAVITY_MPS2;
-  if (stillLatched) {
-    if (omegaMag > STILL_EXIT_DPS || normDevTick > STILL_EXIT_NORM) {
-      stillLatched = false;
-      stillWindowReset();
-      stillCooldown = STILL_COOLDOWN;
-      Serial.println("still exit");
-    } else {
-      stillWindowPush(gyro.x, gyro.y, gyro.z, bnorm);
-      vec3 resid = stillDriverResidDps();
-      mpu.nudgeGyroBias(resid.x, resid.y, resid.z, STILL_ALPHA);
-    }
+  bool stillExiting = stillLatched &&
+      (omegaMag > STILL_EXIT_DPS || normDevTick > STILL_EXIT_NORM);
+  if (stillExiting) {
+    stillLatched = false;
+    stillWindowReset();
+    stillCooldown = STILL_COOLDOWN;
+    Serial.println("still exit");
   } else {
     stillWindowPush(gyro.x, gyro.y, gyro.z, bnorm);
-    if (stillCooldown > 0) {
-      stillCooldown--;
-    } else if (stillWindowCalm()) {
-      stillLatched = true;
+    bool stillNudge = stillLatched;
+    if (!stillLatched) {
+      if (stillCooldown > 0) {
+        stillCooldown--;
+      } else if (stillWindowCalm()) {
+        stillLatched = true;
+        stillNudge = true;
+      }
+    }
+    if (stillNudge) {
       vec3 resid = stillDriverResidDps();
       mpu.nudgeGyroBias(resid.x, resid.y, resid.z, STILL_ALPHA);
     }
