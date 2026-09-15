@@ -1,5 +1,9 @@
 CompileFlags:
   Remove: [-m*, -f*]
+  Compiler: /home/qscheetz/.arduino15/packages/esp32/tools/esp-x32/2601/bin/xtensa-esp32s3-elf-g++
+  # Point clang at the xtensa sysroot so include_next finds toolchain
+  # headers instead of host glibc (/usr/include).
+  Add: [--sysroot=/home/qscheetz/.arduino15/packages/esp32/tools/esp-x32/2601/xtensa-esp-elf]
 
-Diagnostics:
-  Suppress: [pp_file_not_found]
+# NOTE: .ino language is forced via compile_commands.json (-x c++ injected
+# by `make lsp`); no PathMatch block needed here.
