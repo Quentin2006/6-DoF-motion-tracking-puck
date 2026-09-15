@@ -9,6 +9,7 @@ Mpu6050::Mpu6050()
 
 bool Mpu6050::begin() {
   Wire.begin(static_cast<uint8_t>(sda), static_cast<uint8_t>(scl));
+  Wire.setClock(400000);
 
   if (!writeReg(MPU_PWR_MGMT_1_REG, 0x00)) {
     return false;
@@ -99,19 +100,16 @@ void Mpu6050::getAccelBias(int samples) {
   }
   if (ok > 0) {
     total /= static_cast<float>(ok);
-    // total includes 1 g of gravity: remove it from the dominant axis so
-    // accel_bias holds sensor offset only and readAccel preserves gravity.
-    const float ax = fabsf(total.x);
-    const float ay = fabsf(total.y);
-    const float az = fabsf(total.z);
-    if (ax >= ay && ax >= az) {
-      total.x -= (total.x >= 0 ? GRAVITY_MPS2 : -GRAVITY_MPS2);
-    } else if (ay >= ax && ay >= az) {
-      total.y -= (total.y >= 0 ? GRAVITY_MPS2 : -GRAVITY_MPS2);
-    } else {
-      total.z -= (total.z >= 0 ? GRAVITY_MPS2 : -GRAVITY_MPS2);
+    // Tilt-robust: subtract gravity along the measured direction so
+    // accel_bias holds sensor offset only at any rest tilt and readAccel preserves gravity.
+    const float n = sqrtf(total.x * total.x + total.y * total.y + total.z * total.z);
+    if (n < 1e-9f) {
+      return;
     }
-    accel_bias = total;
+    const float s = GRAVITY_MPS2 / n;
+    accel_bias.x = total.x - total.x * s;
+    accel_bias.y = total.y - total.y * s;
+    accel_bias.z = total.z - total.z * s;
   }
 }
 

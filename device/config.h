@@ -1,7 +1,7 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
-#include <stdint.h>
 
 // ------------------------------- MPU -------------------------------
 constexpr int SDA_PIN = 5;
@@ -19,15 +19,25 @@ constexpr uint8_t MPU_CONFIG_REG = 0x1A;
 constexpr uint8_t MPU_GYRO_CONFIG_REG = 0x1B;
 constexpr uint8_t MPU_ACCEL_CONFIG_REG = 0x1C;
 constexpr uint8_t MPU_SMPLRT_DIV_VAL = 0x00;   // 1 kHz when DLPF enabled
-constexpr uint8_t MPU_CONFIG_VAL = 0x03;       // DLPF 44 Hz
-constexpr uint8_t MPU_GYRO_CONFIG_VAL = 0x00;  // ±250 dps → matches GYRO_LSB_TO_DPS
-constexpr uint8_t MPU_ACCEL_CONFIG_VAL = 0x00; // ±2 g → matches ACCEL_LSB_O_MPS2
+constexpr uint8_t MPU_CONFIG_VAL = 0x01;       // DLPF 184 Hz gyro / 188 Hz accel, 1 kHz
+constexpr uint8_t MPU_GYRO_CONFIG_VAL = 0x18;  // FS_SEL=3 → ±2000 dps
+constexpr uint8_t MPU_ACCEL_CONFIG_VAL = 0x10; // AFS_SEL=2 → ±8 g
 constexpr int MPU_CALIB_DELAY_MS = 5;
 constexpr uint8_t MPU_I2C_TIMEOUT_MS = 50;
-constexpr int GYRO_CALIB_SAMPLES = 100;
-constexpr float ACCEL_LSB_O_MPS2 = 9.80665f / 16384.0f;
-constexpr float GYRO_LSB_TO_DPS = 1.0f / 131.0f;
+constexpr int GYRO_CALIB_SAMPLES = 200; // ±2000dps noise floor is 8x the old ±250dps scale
+constexpr float ACCEL_LSB_O_MPS2 = 9.80665f / 4096.0f; // ±8 g
+constexpr float GYRO_LSB_TO_DPS = 1.0f / 16.4f;         // ±2000 dps
 constexpr float GRAVITY_MPS2 = 9.80665f;
+constexpr uint16_t UDP_PORT = 3333;      // must match engine/src/tracking.rs UDP_PORT
+constexpr int FUSION_RATE_HZ = 500;
+constexpr float DPS_TO_RPS = 3.14159265f / 180.0f; // deg/s to rad/s
+constexpr size_t QUAT_PACKET_SIZE = 24;  // seq u32 + micros u32 + xyzw f32 LE
+constexpr float EKF_SIGMA_GYRO = 0.002f;   // rad/s/sqrt(Hz), from ±0.15 dps stationary floor
+constexpr float EKF_SIGMA_BG = 5.0e-06f;   // rad/s^2/sqrt(Hz), bias random walk
+constexpr float EKF_SIGMA_ACCEL = 0.02f;   // normalized-accel units (~0.2 m/s²)
+constexpr float EKF_GATE_MAHA = 11.34f;    // chi2 3-dof 99%: reject above this
+constexpr float EKF_GATE_NORM = 0.35f;     // skip update when ||a|-g|/g exceeds this
+constexpr int8_t FUSION_AXIS_MAP[3] = {3, 2, 1}; // body=(+sz,+sy,+sx): pitch/roll inputs swapped per live test; sensor +X (up, ~9.8 at rest) to body +Z matching EKF gravity [0,0,1]
 
 // ------------------------------- DISPLAY -------------------------------
 // Pins are FIXED — user refused rewire. NEVER move them.
@@ -55,3 +65,4 @@ constexpr int BL_PIN = -1;
 #include "secrets.h"
 constexpr const char *ssid = WIFI_SSID;
 constexpr const char *pwd = WIFI_PASSWORD;
+constexpr const char *engine_ip = ENGINE_IP;

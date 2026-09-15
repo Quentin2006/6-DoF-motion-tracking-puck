@@ -52,7 +52,9 @@ fn update(
 
     if let Some((seq, _stamp, q)) = latest {
         if let Some(prev) = *last_seq {
-            if seq != prev.wrapping_add(1) {
+            // Drain-to-latest normally skips ~4 packets/frame at 250Hz/60fps — not loss; threshold 25 (~100ms) flags real bursts only.
+            let skipped = seq.wrapping_sub(prev.wrapping_add(1));
+            if skipped > 25 {
                 println!(
                     "seq gap: prev {prev} got {seq} (lost {})",
                     seq.wrapping_sub(prev.wrapping_add(1))
