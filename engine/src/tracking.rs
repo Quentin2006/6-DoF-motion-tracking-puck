@@ -5,8 +5,9 @@ use bevy::prelude::*;
 #[derive(Resource)]
 struct Socket(UdpSocket);
 
+// Marker for the camera rig driven by the tracking puck (look-around).
 #[derive(Component)]
-struct Puck;
+struct LookRig;
 
 // must match device/config.h UDP_PORT
 const UDP_PORT: u16 = 3333;
@@ -20,9 +21,9 @@ const PACKET_LEN_V2: usize = 36;
 const PREDICT_TAU_S: f32 = 0.008;
 const SMOOTH_TAU_S: f32 = 0.006;
 
-pub struct CubePlugin;
+pub struct TrackPlugin;
 
-impl Plugin for CubePlugin {
+impl Plugin for TrackPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, (setup_world, setup_socket));
         app.add_systems(Update, update);
@@ -67,7 +68,7 @@ fn parse_v2(raw: &[u8]) -> (u32, u32, Quat, Vec3) {
 }
 
 fn update(
-    query: Single<&mut Transform, With<Puck>>,
+    camera: Single<&mut Transform, With<LookRig>>,
     socket: Res<Socket>,
     mut last_seq: Local<Option<u32>>,
     mut last_applied: Local<Option<Quat>>,
@@ -122,7 +123,7 @@ fn update(
         }
         .normalize();
 
-        query.into_inner().rotation = q_out;
+        camera.into_inner().rotation = q_out;
         *last_applied = Some(q_out);
     }
 }
@@ -132,17 +133,21 @@ fn setup_world(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    // Static reference object so the camera rig's motion is visible.
     commands.spawn((
-        Puck,
         Mesh3d(meshes.add(Cuboid::new(2.9 / 2., 0.1 / 2., 5.7 / 2.))),
         MeshMaterial3d(materials.add(Color::srgb(0.3, 0.5, 0.8))),
-        Transform::from_xyz(0.0, 0.5, 0.0),
+        Transform::from_xyz(0.0, 0.5, -6.0),
     ));
 
     commands.spawn((PointLight::default(), Transform::from_xyz(4.0, 8.0, 4.0)));
 
+    // The puck drives this camera rig. Quaternion maps directly to orientation;
+    // translation stays at the eye position. Rest quat (identity) looks down -Z,
+    // so the reference object sits in front of it.
     commands.spawn((
+        LookRig,
         Camera3d::default(),
-        Transform::from_xyz(-2.0, 2.5, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(0.0, 1.5, 0.0),
     ));
 }
