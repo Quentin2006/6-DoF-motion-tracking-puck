@@ -62,6 +62,16 @@ constexpr uint8_t RST_PIN = 9;
 // BL rail-tied: no GPIO. Kept as -1 sentinel so stale code fails loudly.
 constexpr int BL_PIN = -1;
 
+// ------------------------------- STATUS LED -------------------------------
+// Onboard WS2812 addressable RGB (GPIO48 on the stock S3 devkit). Driven via
+// the core's rgbLedWrite(pin, R, G, B) (GRB reordered internally). Used as a
+// calibration/debug light: red while calibrating, green when done.
+#ifdef RGB_BUILTIN
+constexpr int RGB_LED_PIN = RGB_BUILTIN;
+#else
+constexpr int RGB_LED_PIN = 48; // onboard WS2812 on most S3 boards
+#endif
+
 // WiFi credentials live in secrets.h (gitignored, see secrets.h.example).
 #include "secrets.h"
 constexpr const char *ssid = WIFI_SSID;
