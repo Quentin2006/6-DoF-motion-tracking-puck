@@ -11,8 +11,14 @@ struct Puck;
 // must match device/config.h UDP_PORT
 const UDP_PORT: u16 = 3333;
 const BIND_HOST: &str = "0.0.0.0";
-// must match QUAT_PACKET_SIZE (seq + micros + xyzw)
-const PACKET_SIZE: usize = 24;
+// must match device/config.h QUAT_PACKET_SIZE / QUAT_PACKET_SIZE_V2
+// (seq + micros + xyzw = 24 legacy; + gyro xyz = 36 v2)
+const PACKET_LEN_V1: usize = 24;
+const PACKET_LEN_V2: usize = 36;
+
+// Transport+render delay extrapolated from packet gyro, and display smoothing.
+const PREDICT_TAU_S: f32 = 0.008;
+const SMOOTH_TAU_S: f32 = 0.006;
 
 pub struct CubePlugin;
 
@@ -30,27 +36,56 @@ fn setup_socket(mut commands: Commands) {
     commands.insert_resource(Socket(udp));
 }
 
-fn parse_packet(raw: [u8; PACKET_SIZE]) -> (u32, u32, Quat) {
+#[inline]
+fn f(raw: &[u8], i: usize) -> f32 {
+    f32::from_le_bytes([raw[i], raw[i + 1], raw[i + 2], raw[i + 3]])
+}
+
+fn parse_v1(raw: [u8; PACKET_LEN_V1]) -> (u32, u32, Quat) {
     let seq = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
     let stamp = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);
-    let f = |i: usize| f32::from_le_bytes([raw[i], raw[i + 1], raw[i + 2], raw[i + 3]]);
-    (seq, stamp, Quat::from_xyzw(f(8), f(12), f(16), f(20)))
+    (seq, stamp, Quat::from_xyzw(f(&raw, 8), f(&raw, 12), f(&raw, 16), f(&raw, 20)))
+}
+
+fn parse_v2(raw: [u8; PACKET_LEN_V2]) -> (u32, u32, Quat, Vec3) {
+    let seq = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+    let stamp = u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]);
+    let q = Quat::from_xyzw(f(&raw, 8), f(&raw, 12), f(&raw, 16), f(&raw, 20));
+    // Body-frame gyro rad/s.
+    let gyro = Vec3::new(f(&raw, 24), f(&raw, 28), f(&raw, 32));
+    (seq, stamp, q, gyro)
 }
 
 fn update(
     query: Single<&mut Transform, With<Puck>>,
     socket: Res<Socket>,
     mut last_seq: Local<Option<u32>>,
+    mut last_gyro: Local<Option<Vec3>>,
+    mut last_applied: Local<Option<Quat>>,
+    time: Res<Time>,
 ) {
-    // Drain to latest: 24-byte LE seq+stamp+xyzw packet, ESP32 and x86 both LE
-    let mut buf = [0u8; PACKET_SIZE];
-    let mut latest: Option<(u32, u32, Quat)> = None;
+    // Drain to latest: ESP32 and x86 both LE.
+    let mut buf = [0u8; PACKET_LEN_V2];
+    let mut latest: Option<(u32, u32, Quat, Option<Vec3>)> = None;
 
-    while let Ok(PACKET_SIZE) = socket.0.recv(&mut buf) {
-        latest = Some(parse_packet(buf));
+    while let Ok(n) = socket.0.recv(&mut buf) {
+        match n {
+            PACKET_LEN_V1 => {
+                let v1: [u8; PACKET_LEN_V1] = buf[..PACKET_LEN_V1]
+                    .try_into()
+                    .expect("slice len matches V1");
+                let (seq, stamp, q) = parse_v1(v1);
+                latest = Some((seq, stamp, q, None));
+            }
+            PACKET_LEN_V2 => {
+                let (seq, stamp, q, gyro) = parse_v2(buf);
+                latest = Some((seq, stamp, q, Some(gyro)));
+            }
+            _ => {}
+        }
     }
 
-    if let Some((seq, _stamp, q)) = latest {
+    if let Some((seq, _stamp, q, gyro)) = latest {
         if let Some(prev) = *last_seq {
             // Drain-to-latest normally skips ~4 packets/frame at 250Hz/60fps — not loss; threshold 25 (~100ms) flags real bursts only.
             let skipped = seq.wrapping_sub(prev.wrapping_add(1));
@@ -62,7 +97,34 @@ fn update(
             }
         }
         *last_seq = Some(seq);
-        query.into_inner().rotation = q;
+        // Only overwrite when the packet carried gyro (v2).
+        if let Some(w) = gyro {
+            *last_gyro = Some(w);
+        }
+
+        // Predict forward by PREDICT_TAU_S in the body frame (right-multiply).
+        // Legacy v1 packets carry no gyro, so they skip prediction.
+        let q_show = match gyro {
+            Some(w) => {
+                let ang = w.length() * PREDICT_TAU_S;
+                if ang > 1e-6 {
+                    q * Quat::from_axis_angle(w.normalize(), ang)
+                } else {
+                    q
+                }
+            }
+            None => q,
+        };
+
+        let dt_render = time.delta_secs();
+        let alpha = (1.0 - (-dt_render / SMOOTH_TAU_S).exp()).clamp(0.0, 1.0);
+        let q_out = match *last_applied {
+            Some(p) => p.slerp(q_show, alpha).normalize(),
+            None => q_show.normalize(),
+        };
+
+        query.into_inner().rotation = q_out;
+        *last_applied = Some(q_out);
     }
 }
 

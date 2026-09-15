@@ -370,7 +370,7 @@ void loop() {
   quatMul(-0.70710678f, 0.0f, 0.0f, 0.70710678f, ex, ey, ez, ew, tx, ty, tz, tw);
   float qx, qy, qz, qw;
   quatMul(tx, ty, tz, tw, 0.70710678f, 0.0f, 0.0f, 0.70710678f, qx, qy, qz, qw);
-  uint8_t pkt[QUAT_PACKET_SIZE];
+  uint8_t pkt[QUAT_PACKET_SIZE_V2];
   uint32_t stamp = micros();
   memcpy(pkt + 0, &pktSeq, 4);
   memcpy(pkt + 4, &stamp, 4);
@@ -378,9 +378,13 @@ void loop() {
   memcpy(pkt + 12, &qy, 4);
   memcpy(pkt + 16, &qz, 4);
   memcpy(pkt + 20, &qw, 4);
+  float wx = bgx * DPS_TO_RPS, wy = bgy * DPS_TO_RPS, wz = bgz * DPS_TO_RPS;
+  memcpy(pkt + 24, &wx, 4);
+  memcpy(pkt + 28, &wy, 4);
+  memcpy(pkt + 32, &wz, 4);
   if ((tick & 1) == 0) {
     udp.beginPacket(engine_ip, UDP_PORT);
-    udp.write(pkt, QUAT_PACKET_SIZE);
+    udp.write(pkt, QUAT_PACKET_SIZE_V2);
     udp.endPacket();
     pktSeq++;
   }
