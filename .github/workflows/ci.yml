@@ -24,7 +24,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install arduino-cli
         run: |
-          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR=${HOME}/bin sh
+          mkdir -p "${HOME}/bin"
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR="${HOME}/bin" sh
           echo "${HOME}/bin" >> "$GITHUB_PATH"
       - name: Install ESP32 core
         run: |
