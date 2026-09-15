@@ -1,5 +1,5 @@
 #include "net.h"
-#include <string.h>
+#include "packet.h"
 
 bool Net::begin(const char *ssid, const char *pwd, const char *ip, uint16_t port) {
   ip_ = ip;
@@ -24,16 +24,7 @@ void Net::sendQuat(const float quat[4], const float gyro[3], uint32_t stamp) {
   sendNow_ = !sendNow_;
 
   uint8_t pkt[QUAT_PACKET_SIZE_V2];
-  memcpy(pkt + 0, &pktSeq_, 4);
-  memcpy(pkt + 4, &stamp, 4);
-  memcpy(pkt + 8, &quat[0], 4);
-  memcpy(pkt + 12, &quat[1], 4);
-  memcpy(pkt + 16, &quat[2], 4);
-  memcpy(pkt + 20, &quat[3], 4);
-  float wx = gyro[0], wy = gyro[1], wz = gyro[2];
-  memcpy(pkt + 24, &wx, 4);
-  memcpy(pkt + 28, &wy, 4);
-  memcpy(pkt + 32, &wz, 4);
+  build_quat_packet(pkt, pktSeq_, stamp, quat, gyro);
   if (doSend) {
     udp_.beginPacket(ip_, port_);
     udp_.write(pkt, QUAT_PACKET_SIZE_V2);

@@ -151,3 +151,67 @@ fn setup_world(
         Transform::from_xyz(0.0, 1.5, 0.0),
     ));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Shared byte-level fixture: the committed tests/packet_fixture.txt is the
+    // single source of truth for the v2 wire layout, also asserted by the C++
+    // producer test (tests/packet_test.cpp) against the same bytes.
+    const FIXTURE: &str = include_str!("../../tests/packet_fixture.txt");
+
+    fn fixture_hex() -> &'static str {
+        FIXTURE
+            .lines()
+            .find(|l| {
+                let t = l.trim();
+                !t.is_empty() && !t.starts_with('#')
+            })
+            .unwrap()
+            .trim()
+    }
+
+    fn hex_bytes(s: &str) -> Vec<u8> {
+        let clean: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        clean
+            .as_bytes()
+            .chunks(2)
+            .map(|ch| u8::from_str_radix(std::str::from_utf8(ch).unwrap(), 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn parse_v2_roundtrips_the_committed_fixture() {
+        let bytes = hex_bytes(fixture_hex());
+        assert_eq!(bytes.len(), PACKET_LEN_V2);
+        let (seq, stamp, q, gyro) = parse_v2(&bytes);
+        assert_eq!((seq, stamp), (42, 1000));
+        assert_eq!(q, Quat::from_xyzw(0.0, 0.0, 0.0, 1.0));
+        let e = gyro - Vec3::new(0.5, -0.25, 1.5);
+        assert!(e.length() < 1e-6, "gyro mismatch: {gyro:?}");
+    }
+
+    #[test]
+    fn parse_v1_roundtrips_identity_quat() {
+        // v1: seq | stamp | quat xyzw (24 bytes), no gyro.
+        let mut b = Vec::new();
+        for v in [42u32.to_le_bytes(), 1000u32.to_le_bytes()] {
+            b.extend_from_slice(&v);
+        }
+        for v in [0.0f32, 0.0f32, 0.0f32, 1.0f32] {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        let (seq, stamp, q) = parse_v1(&b);
+        assert_eq!((seq, stamp), (42, 1000));
+        assert_eq!(q, Quat::from_xyzw(0.0, 0.0, 0.0, 1.0));
+    }
+
+    #[test]
+    fn header_decodes_seq_and_stamp_little_endian() {
+        let mut b = Vec::new();
+        b.extend_from_slice(&42u32.to_le_bytes());
+        b.extend_from_slice(&1000u32.to_le_bytes());
+        assert_eq!(header(&b), (42, 1000));
+    }
+}
