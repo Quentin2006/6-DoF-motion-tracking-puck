@@ -4,9 +4,9 @@
 #include <Wire.h>
 
 struct vec3 {
-  float x;
-  float y;
-  float z;
+  float x = 0;
+  float y = 0;
+  float z = 0;
 
   vec3 &operator+=(const vec3 &rhs) {
     this->x += rhs.x;
@@ -22,7 +22,7 @@ struct vec3 {
     return *this;
   }
 
-  bool operator==(const vec3 &rhs) {
+  bool operator==(const vec3 &rhs) const {
     return this->x == rhs.x && this->y == rhs.y && this->z == rhs.z;
   }
 
@@ -36,24 +36,22 @@ struct vec3 {
 
 class Mpu6050 {
 public:
-  Mpu6050();
+  Mpu6050(); // trivial: init addr/sda/scl/bases, zero biases; NO I2C
+
+  bool begin(); // Wire.begin(sda,scl), wake, verify, configure; false on failure
+
+  bool readGyro(vec3 &out);  // dps, bias-corrected, NO dt scaling
+  bool readAccel(vec3 &out); // m/s², bias-corrected, NO dt scaling
 
   void getGyroBias(int samples);
   void getAccelBias(int samples);
 
-  // these will auto normalize to the delta time
-  bool readGyro(vec3 &sample);
-  bool readAccel(vec3 &sample);
-
 private:
-  float read_data(size_t registerAddress, float scale);
+  bool writeReg(uint8_t reg, uint8_t val);
+  bool readBurst6(uint8_t baseReg, float scale, vec3 &out);
 
   uint8_t addr;
   int sda, scl;
   uint8_t mpu_gyro_base, mpu_accel_base;
-
-  unsigned long now_gyro_us, last_gyro_us;
-  unsigned long now_accel_us, last_accel_us;
-
   vec3 gyro_bias, accel_bias;
 };

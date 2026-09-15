@@ -1,21 +1,29 @@
-#include <Arduino.h>
+#include "config.h"
 #include "mpu6050.h"
+#include <Arduino.h>
 
 Mpu6050 mpu;
-
 void setup() {
   Serial.begin(115200);
-  Serial.flush();
-  delay(3000);
-  mpu.getAccelBias(10);
-  mpu.getGyroBias(10);
+  delay(500);
+  if (!mpu.begin()) {
+    Serial.println("MPU6050 init failed");
+    while (true) {
+      delay(100);
+    }
+  }
+  mpu.getAccelBias(GYRO_CALIB_SAMPLES);
+  mpu.getGyroBias(GYRO_CALIB_SAMPLES);
 }
-
 void loop() {
-  vec3 gyro, accel;
-  mpu.readGyro(gyro);
-  mpu.readAccel(accel);
-  Serial.printf("gyro: %f, %f, %f\n", gyro.x, gyro.y, gyro.z);
-  Serial.printf("accel: %f, %f, %f\n", accel.x, accel.y, accel.z);
-  delay(1000);
+  vec3 accel, gyro;
+  bool okA = mpu.readAccel(accel);
+  bool okG = mpu.readGyro(gyro);
+  if (!okA || !okG) {
+    Serial.println("MPU read failed");
+    delay(100);
+    return;
+  }
+  // rates here are instantaneous dps / m/s²; integrate/Δt belongs to the future filter, not the driver
+  delay(100);
 }

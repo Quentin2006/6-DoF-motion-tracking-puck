@@ -1,96 +1,150 @@
+#include <math.h>
 #include "mpu6050.h"
 #include "config.h"
 
 Mpu6050::Mpu6050()
-    : addr(MPU_ADDR), sda(SDA_PIN), scl(SCL_PIN), mpu_gyro_base(MPU_GYRO_BASE),
-      mpu_accel_base(MPU_ACCEL_BASE), gyro_bias({0, 0, 0}) {
+    : addr(MPU_ADDR), sda(SDA_PIN), scl(SCL_PIN),
+      mpu_gyro_base(MPU_GYRO_BASE), mpu_accel_base(MPU_ACCEL_BASE),
+      gyro_bias{0, 0, 0}, accel_bias{0, 0, 0} {}
 
-  // wake the mpu
-  Wire.beginTransmission(MPU_ADDR);
-  Wire.write(MPU_PWR_MGMT_1_REG);
-  Wire.write(0x00);
-  Wire.endTransmission(true);
+bool Mpu6050::begin() {
+  Wire.begin(static_cast<uint8_t>(sda), static_cast<uint8_t>(scl));
 
-  Wire.begin(SDA_PIN, SCL_PIN);
+  if (!writeReg(MPU_PWR_MGMT_1_REG, 0x00)) {
+    return false;
+  }
+  delay(100);
+
+  Wire.beginTransmission(addr);
+  Wire.write(MPU_WHO_AM_I_REG);
+  if (Wire.endTransmission(false) != 0) {
+    return false;
+  }
+  if (Wire.requestFrom(addr, static_cast<uint8_t>(1)) != 1) {
+    return false;
+  }
+  const int who = Wire.read();
+  if (who != MPU_WHO_AM_I_EXPECT && who != MPU_WHO_AM_I_EXPECT_ALT) {
+    return false;
+  }
+
+  if (!writeReg(MPU_SMPLRT_DIV_REG, MPU_SMPLRT_DIV_VAL)) {
+    return false;
+  }
+  if (!writeReg(MPU_CONFIG_REG, MPU_CONFIG_VAL)) {
+    return false;
+  }
+  if (!writeReg(MPU_GYRO_CONFIG_REG, MPU_GYRO_CONFIG_VAL)) {
+    return false;
+  }
+  if (!writeReg(MPU_ACCEL_CONFIG_REG, MPU_ACCEL_CONFIG_VAL)) {
+    return false;
+  }
+  return true;
 }
 
-bool Mpu6050::readGyro(vec3 &sample) {
-  now_gyro_us = micros();
-  const float dt = (now_gyro_us - last_gyro_us) / 1000000.0f;
-  last_gyro_us = now_gyro_us;
-
-  sample = {read_data(mpu_gyro_base, GYRO_LSB_TO_DPS) * dt,
-            read_data(mpu_gyro_base + 0x2, GYRO_LSB_TO_DPS) * dt,
-            read_data(mpu_gyro_base + 0x4, GYRO_LSB_TO_DPS) * dt};
-
-  sample -= gyro_bias;
-
-  return !isnan(sample.x) && !isnan(sample.y) && !isnan(sample.z);
+bool Mpu6050::readGyro(vec3 &out) {
+  vec3 raw;
+  if (!readBurst6(mpu_gyro_base, GYRO_LSB_TO_DPS, raw)) {
+    return false;
+  }
+  out = raw;
+  out -= gyro_bias;
+  return true;
 }
 
-bool Mpu6050::readAccel(vec3 &sample) {
-  now_accel_us = micros();
-  const float dt = (now_accel_us - last_accel_us) / 1000000.0f;
-  last_accel_us = now_accel_us;
-
-  sample = {read_data(mpu_accel_base, ACCEL_LSB_O_MPS2) * dt,
-            read_data(mpu_accel_base + 0x2, ACCEL_LSB_O_MPS2) * dt,
-            read_data(mpu_accel_base + 0x4, ACCEL_LSB_O_MPS2) * dt};
-
-  sample -= accel_bias;
-
-  return !isnan(sample.x) && !isnan(sample.y) && !isnan(sample.z);
+bool Mpu6050::readAccel(vec3 &out) {
+  vec3 raw;
+  if (!readBurst6(mpu_accel_base, ACCEL_LSB_O_MPS2, raw)) {
+    return false;
+  }
+  out = raw;
+  out -= accel_bias;
+  return true;
 }
 
 void Mpu6050::getGyroBias(int samples) {
-  vec3 running_total;
-  vec3 cur_sample;
-
-  // we do this becuse the last_gyro_us is invalid this run
-  readGyro(cur_sample);
-  for (int i = 0; i < samples; ++i) {
-    delay(5);
-    readGyro(cur_sample);
-    running_total += cur_sample;
+  if (samples <= 0) {
+    return;
   }
-
-  running_total /= static_cast<float>(samples);
-
-  gyro_bias = running_total;
+  vec3 total;
+  vec3 s;
+  int ok = 0;
+  for (int i = 0; i < samples; ++i) {
+    delay(MPU_CALIB_DELAY_MS);
+    if (readBurst6(mpu_gyro_base, GYRO_LSB_TO_DPS, s)) {
+      total += s;
+      ++ok;
+    }
+  }
+  if (ok > 0) {
+    total /= static_cast<float>(ok);
+    gyro_bias = total;
+  }
 }
 
 void Mpu6050::getAccelBias(int samples) {
-  vec3 running_total;
-  vec3 cur_sample;
-
-  // we do this becuse the last_accel_us is invalid this run
-  readAccel(cur_sample);
-  for (int i = 0; i < samples; ++i) {
-    delay(5);
-    readAccel(cur_sample);
-    running_total += cur_sample;
+  if (samples <= 0) {
+    return;
   }
-
-  running_total /= static_cast<float>(samples);
-
-  accel_bias = running_total;
+  vec3 total;
+  vec3 s;
+  int ok = 0;
+  for (int i = 0; i < samples; ++i) {
+    delay(MPU_CALIB_DELAY_MS);
+    if (readBurst6(mpu_accel_base, ACCEL_LSB_O_MPS2, s)) {
+      total += s;
+      ++ok;
+    }
+  }
+  if (ok > 0) {
+    total /= static_cast<float>(ok);
+    // total includes 1 g of gravity: remove it from the dominant axis so
+    // accel_bias holds sensor offset only and readAccel preserves gravity.
+    const float ax = fabsf(total.x);
+    const float ay = fabsf(total.y);
+    const float az = fabsf(total.z);
+    if (ax >= ay && ax >= az) {
+      total.x -= (total.x >= 0 ? GRAVITY_MPS2 : -GRAVITY_MPS2);
+    } else if (ay >= ax && ay >= az) {
+      total.y -= (total.y >= 0 ? GRAVITY_MPS2 : -GRAVITY_MPS2);
+    } else {
+      total.z -= (total.z >= 0 ? GRAVITY_MPS2 : -GRAVITY_MPS2);
+    }
+    accel_bias = total;
+  }
 }
 
-float Mpu6050::read_data(size_t registerAddress, float scale) {
-  Wire.beginTransmission(MPU_ADDR);
-  Wire.write(registerAddress);
+bool Mpu6050::writeReg(uint8_t reg, uint8_t val) {
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  Wire.write(val);
+  return Wire.endTransmission(true) == 0;
+}
+
+bool Mpu6050::readBurst6(uint8_t baseReg, float scale, vec3 &out) {
+  Wire.beginTransmission(addr);
+  Wire.write(baseReg);
   if (Wire.endTransmission(false) != 0) {
-    return NAN;
+    return false;
   }
-
-  if (Wire.requestFrom(MPU_ADDR, 2) != 2) {
-    return NAN;
+  if (Wire.requestFrom(addr, static_cast<uint8_t>(6)) != 6) {
+    return false;
   }
-
-  const uint8_t high = Wire.read();
-  const uint8_t low = Wire.read();
-
-  const int16_t data =
-      static_cast<int16_t>((static_cast<uint16_t>(high) << 8) | low);
-  return static_cast<float>(data);
+  const uint8_t xh = Wire.read();
+  const uint8_t xl = Wire.read();
+  const uint8_t yh = Wire.read();
+  const uint8_t yl = Wire.read();
+  const uint8_t zh = Wire.read();
+  const uint8_t zl = Wire.read();
+  const int16_t xr =
+      static_cast<int16_t>((static_cast<uint16_t>(xh) << 8) | xl);
+  const int16_t yr =
+      static_cast<int16_t>((static_cast<uint16_t>(yh) << 8) | yl);
+  const int16_t zr =
+      static_cast<int16_t>((static_cast<uint16_t>(zh) << 8) | zl);
+  vec3 tmp{static_cast<float>(xr) * scale, static_cast<float>(yr) * scale,
+           static_cast<float>(zr) * scale};
+  out = tmp;
+  return true;
 }
