@@ -7,6 +7,7 @@
 // Build: g++ -std=c++17 -Idevice tests/packet_test.cpp -o build/packet_test
 // Run:   ./build/packet_test tests/packet_fixture.txt
 #include "packet.h"
+#include <cctype>
 #include <cstdio>
 #include <fstream>
 #include <string>
