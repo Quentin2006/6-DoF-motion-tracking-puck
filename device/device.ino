@@ -3,13 +3,17 @@
 #include "net.h"
 #include "cal.h"
 #include "led.h"
+#include "display.h"
 #include <Arduino.h>
 
 Tracker tracker;
 Net net;
 AccelCalibrator cal;
 StatusLed led;
+Display display;
 unsigned long lastStatusMs = 0;
+unsigned long lastColorMs = 0;
+uint8_t colorIdx = 0;
 
 void setup() {
   Serial.begin(115200);
@@ -40,6 +44,9 @@ void setup() {
     Serial.read();
   }
   tracker.seedEKF();
+  (void)display.begin(); // best-effort: tracking is authoritative, panel advisory
+  display.fill(ST77XX_RED);
+  lastColorMs = millis();
   led.green(); // calibrated, streaming
   lastStatusMs = millis();
 }
@@ -87,5 +94,11 @@ void loop() {
     Serial.print(" st ");
     Serial.println(tracker.stillLatch() ? 1 : 0);
     tracker.resetGated();
+  }
+  if ((unsigned long)(nowMs - lastColorMs) >= DISPLAY_COLOR_PERIOD_MS) {
+    lastColorMs = nowMs;
+    colorIdx = (uint8_t)((colorIdx + 1) % 3);
+    const uint16_t c = (colorIdx == 0) ? ST77XX_RED : (colorIdx == 1) ? ST77XX_GREEN : ST77XX_BLUE;
+    display.fill(c);
   }
 }
