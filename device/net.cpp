@@ -19,6 +19,44 @@ bool Net::begin(const char *ssid, const char *pwd, const char *ip, uint16_t port
   return true;
 }
 
+bool Net::beginVideo(uint16_t port) {
+  return video_.begin(port) == 1;
+}
+
+int Net::pollVideoChunk(uint8_t *payload_out, VideoChunkHdr &hdr) {
+  if (!payload_out) {
+    return 0;
+  }
+  int n = video_.parsePacket();
+  if (n <= 0) {
+    return 0;
+  }
+  uint8_t hdrBuf[VIDEO_HDR_LEN];
+  int hr = video_.read(hdrBuf, sizeof hdrBuf);
+  if (hr < (int)VIDEO_HDR_LEN) {
+    video_.flush();
+    return 0;
+  }
+  if (!parse_video_header(hdrBuf, sizeof hdrBuf, hdr)) {
+    video_.flush();
+    return 0;
+  }
+  int want = (int)hdr.len;
+  int cap = n - (int)VIDEO_HDR_LEN;
+  if (want <= 0 || want > (int)VIDEO_PAYLOAD_MAX || want > cap) {
+    video_.flush();
+    return 0;
+  }
+  int got = video_.read(payload_out, (size_t)want);
+  if (got < want) {
+    video_.flush();
+    return 0;
+  }
+  // One packet buffered at a time; remainder (if any) belongs to no chunk.
+  video_.flush();
+  return want;
+}
+
 void Net::sendQuat(const float quat[4], const float gyro[3], uint32_t stamp) {
   bool doSend = sendNow_;
   sendNow_ = !sendNow_;

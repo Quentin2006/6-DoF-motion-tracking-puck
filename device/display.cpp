@@ -21,6 +21,24 @@ void Display::present(const uint16_t *frame) {
   tft_.drawRGBBitmap(0, 0, frame, TFT_W, TFT_H);
 }
 
+void Display::writeChunk(int x, int y, int w, int h, const uint16_t *px) {
+  if (!px || w <= 0 || h <= 0 || x < 0 || y < 0) {
+    return;
+  }
+  if (x + w > VIDEO_W || y + h > VIDEO_H) {
+    return;
+  }
+  if (!videoMode_) {
+    videoMode_ = true;
+    tft_.setRotation(VIDEO_ROTATION);
+  }
+  tft_.startWrite();
+  tft_.setAddrWindow((uint16_t)x, (uint16_t)y, (uint16_t)w, (uint16_t)h);
+  // writePixels takes non-const; payload buffer is caller-owned scratch.
+  tft_.writePixels(const_cast<uint16_t *>(px), (uint32_t)w * (uint32_t)h, true, false);
+  tft_.endWrite();
+}
+
 void Display::fill(uint16_t color) {
   tft_.fillScreen(color);
 }
