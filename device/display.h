@@ -15,8 +15,8 @@ public:
   // native-endian. Null frame: silent no-op.
   void present(const uint16_t *frame);
   // Partial chunk write: push w*h RGB565 LE pixels at (x, y). Ignored when
-  // null or dims out of the 240x320 portrait video space. First call latches
-  // portrait rotation (VIDEO_ROTATION); the still-image present() path keeps
+  // null or dims out of the 320x240 landscape-inverted video space. First
+  // call latches VIDEO_ROTATION; the still-image present() path keeps
   // TFT_ROTATION.
   void writeChunk(int x, int y, int w, int h, const uint16_t *px);
   // Solid fill via fillScreen; RAM-free path for status/demo colors.
