@@ -74,7 +74,7 @@ void loop() {
       videoActiveMs = millis();
       videoSeen = true;
       int rows = n / (VIDEO_W * 2);
-      int y0 = (int)hdr.idx * 3;
+      int y0 = (int)hdr.idx * 2;
       if (rows > 0 && y0 + rows <= VIDEO_H && n == (int)hdr.len) {
         display.writeChunk(0, y0, VIDEO_W, rows, (const uint16_t *)buf);
       }

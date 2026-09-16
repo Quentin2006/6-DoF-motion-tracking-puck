@@ -25,16 +25,16 @@ const PACKET_LEN_V2: usize = 36;
 const PREDICT_TAU_S: f32 = 0.008;
 const SMOOTH_TAU_S: f32 = 0.006;
 
-// Video stream to the puck panel: 240x320 RGB565 over UDP 3334, 107 chunks/frame.
+// Video stream to the puck panel: 320x240 RGB565 over UDP 3334, 120 chunks/frame.
 // Must match device/video.h VIDEO_* constants.
 const VIDEO_UDP_PORT: u16 = 3334;
-const VIDEO_W: usize = 240;
-const VIDEO_H: usize = 320;
-const VIDEO_PAYLOAD_MAX: usize = 1440; // 3 rows x 240 px x 2 B
-const VIDEO_CHUNKS: usize = 107; // 106 x 1440 + 1 x 960 tail
-const VIDEO_TAIL_BYTES: usize = 960; // 2 rows x 240 px x 2 B
+const VIDEO_W: usize = 320;
+const VIDEO_H: usize = 240;
+const VIDEO_PAYLOAD_MAX: usize = 1280; // 2 rows x 320 px x 2 B
+const VIDEO_CHUNKS: usize = 120; // 120 x 1280 (tail equal size)
+const VIDEO_TAIL_BYTES: usize = 1280; // 2 rows x 320 px x 2 B
 const VIDEO_MIN_INTERVAL: Duration = Duration::from_millis(200); // 5 fps V1
-const VIDEO_PADDED_ROW: usize = 1024; // 960 B row padded to COPY_BYTES_PER_ROW_ALIGNMENT
+const VIDEO_PADDED_ROW: usize = 1280; // 1280 B row already 256-aligned, stride equals row bytes
 
 // Marker for the off-screen capture camera slaved to the LookRig.
 #[derive(Component)]
@@ -188,7 +188,7 @@ fn setup_world(
     ));
 }
 fn setup_video(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
-    // Off-screen 240x320 RGBA8 target: COPY_SRC added for the readback copy
+    // Off-screen 320x240 RGBA8 target: COPY_SRC added for the readback copy
     // (missing from new_target_texture's default usage).
     let mut t = Image::new_target_texture(
         VIDEO_W as u32,
@@ -235,8 +235,8 @@ fn rgba8_to_rgb565_le(r: u8, g: u8, b: u8) -> [u8; 2] {
     v.to_le_bytes()
 }
 
-// Readback fires every frame; depad (960->1024 rows), pack RGB565, fragment
-// into 107 datagrams, throttle to 5 fps. Drop-if-behind: skip frames that
+// Readback fires every frame; depad (1280 stride, already aligned), pack RGB565,
+// fragment into 120 datagrams, throttle to 5 fps. Drop-if-behind: skip frames that
 // arrive sooner than VIDEO_MIN_INTERVAL after the last send.
 fn on_video_readback(
     readback: On<ReadbackComplete>,
@@ -257,7 +257,7 @@ fn on_video_readback(
     let frame = video.frame_id;
     video.frame_id = frame.wrapping_add(1);
 
-    // Depad rows: 960 B of RGBA8 per 1024 B stride -> 307200 B RGBA buffer.
+    // Depad rows: 1280 B of RGBA8 per 1280 B stride -> 307200 B RGBA buffer.
     let mut rgb565 = [0u8; VIDEO_PAYLOAD_MAX];
     let mut chunk: u16 = 0;
     let mut fill: usize = 0;
@@ -272,8 +272,8 @@ fn on_video_readback(
             rgb565[fill + 1] = px[1];
             fill += 2;
             col += 1;
-            // Flush full 3-row chunks (1440 B) and the 2-row tail (960 B).
-            let expect = if chunk < 106 {
+            // Flush full 2-row chunks (1280 B); tail is equal size so all 120 send.
+            let expect = if chunk + 1 < VIDEO_CHUNKS as u16 {
                 VIDEO_PAYLOAD_MAX
             } else {
                 VIDEO_TAIL_BYTES
