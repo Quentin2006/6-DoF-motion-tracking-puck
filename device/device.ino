@@ -4,6 +4,7 @@
 #include "led.h"
 #include "display.h"
 #include "video.h"
+#include <Arduino.h>
 
 Tracker tracker;
 Net net;
@@ -12,6 +13,7 @@ Display display;
 unsigned long lastStatusMs = 0;
 unsigned long lastColorMs = 0;
 unsigned long videoActiveMs = 0;
+bool videoSeen = false;
 uint8_t colorIdx = 0;
 
 void setup() {
@@ -70,6 +72,7 @@ void loop() {
     int n = net.pollVideoChunk(buf, hdr);
     if (n > 0) {
       videoActiveMs = millis();
+      videoSeen = true;
       int rows = n / (VIDEO_W * 2);
       int y0 = (int)hdr.idx * 3;
       if (rows > 0 && y0 + rows <= VIDEO_H && n == (int)hdr.len) {
@@ -110,8 +113,9 @@ void loop() {
     tracker.resetGated();
   }
   // RGB demo resumes only after 10 s of video silence so it never fights video.
+  // videoSeen keeps the first 10 s demo intact (videoActiveMs starts at 0).
   if ((unsigned long)(nowMs - lastColorMs) >= DISPLAY_COLOR_PERIOD_MS &&
-      (unsigned long)(nowMs - videoActiveMs) > 10000UL) {
+      (!videoSeen || (unsigned long)(nowMs - videoActiveMs) > 10000UL)) {
     lastColorMs = nowMs;
     colorIdx = (uint8_t)((colorIdx + 1) % 3);
     const uint16_t c = (colorIdx == 0) ? ST77XX_RED : (colorIdx == 1) ? ST77XX_GREEN : ST77XX_BLUE;
