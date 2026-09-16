@@ -4,22 +4,36 @@
 #include "mpu6050.h"
 #include "config.h"
 
+// Register map: driver-internal, never tuned. FSR/DLPF choices (MPU_*_VAL)
+// stay in config.h next to the LSB scales they must agree with.
+namespace {
+constexpr uint8_t kPwrMgmt1Reg = 0x6B;
+constexpr uint8_t kAccelBase = 0x3B;
+constexpr uint8_t kGyroBase = 0x43;
+constexpr uint8_t kWhoAmIReg = 0x75;
+constexpr uint8_t kWhoAmIExpect = 0x68;
+constexpr uint8_t kWhoAmIExpectAlt = 0x74; // observed clone ID; map matches 6050
+constexpr uint8_t kSmplrtDivReg = 0x19;
+constexpr uint8_t kConfigReg = 0x1A;
+constexpr uint8_t kGyroConfigReg = 0x1B;
+constexpr uint8_t kAccelConfigReg = 0x1C;
+} // namespace
+
 Mpu6050::Mpu6050()
     : addr(MPU_ADDR), sda(SDA_PIN), scl(SCL_PIN),
-      mpu_gyro_base(MPU_GYRO_BASE), mpu_accel_base(MPU_ACCEL_BASE),
       gyro_bias{0, 0, 0}, accel_bias{0, 0, 0} {}
 
 bool Mpu6050::begin() {
   Wire.begin(static_cast<uint8_t>(sda), static_cast<uint8_t>(scl));
   Wire.setClock(400000);
 
-  if (!writeReg(MPU_PWR_MGMT_1_REG, 0x00)) {
+  if (!writeReg(kPwrMgmt1Reg, 0x00)) {
     return false;
   }
   delay(100);
 
   Wire.beginTransmission(addr);
-  Wire.write(MPU_WHO_AM_I_REG);
+  Wire.write(kWhoAmIReg);
   if (Wire.endTransmission(false) != 0) {
     return false;
   }
@@ -27,20 +41,20 @@ bool Mpu6050::begin() {
     return false;
   }
   const int who = Wire.read();
-  if (who != MPU_WHO_AM_I_EXPECT && who != MPU_WHO_AM_I_EXPECT_ALT) {
+  if (who != kWhoAmIExpect && who != kWhoAmIExpectAlt) {
     return false;
   }
 
-  if (!writeReg(MPU_SMPLRT_DIV_REG, MPU_SMPLRT_DIV_VAL)) {
+  if (!writeReg(kSmplrtDivReg, MPU_SMPLRT_DIV_VAL)) {
     return false;
   }
-  if (!writeReg(MPU_CONFIG_REG, MPU_CONFIG_VAL)) {
+  if (!writeReg(kConfigReg, MPU_CONFIG_VAL)) {
     return false;
   }
-  if (!writeReg(MPU_GYRO_CONFIG_REG, MPU_GYRO_CONFIG_VAL)) {
+  if (!writeReg(kGyroConfigReg, MPU_GYRO_CONFIG_VAL)) {
     return false;
   }
-  if (!writeReg(MPU_ACCEL_CONFIG_REG, MPU_ACCEL_CONFIG_VAL)) {
+  if (!writeReg(kAccelConfigReg, MPU_ACCEL_CONFIG_VAL)) {
     return false;
   }
   loadAccelCal(); // non-fatal: identity defaults when NVS keys absent
@@ -49,7 +63,7 @@ bool Mpu6050::begin() {
 
 bool Mpu6050::readGyro(vec3 &out) {
   vec3 raw;
-  if (!readBurst6(mpu_gyro_base, GYRO_LSB_TO_DPS, raw)) {
+  if (!readBurst6(kGyroBase, GYRO_LSB_TO_DPS, raw)) {
     return false;
   }
   out = raw;
@@ -59,7 +73,7 @@ bool Mpu6050::readGyro(vec3 &out) {
 
 bool Mpu6050::readAccel(vec3 &out) {
   vec3 raw;
-  if (!readBurst6(mpu_accel_base, ACCEL_LSB_O_MPS2, raw)) {
+  if (!readBurst6(kAccelBase, ACCEL_LSB_O_MPS2, raw)) {
     return false;
   }
   // 6-point factory cal (m/s² domain): offset then per-axis scale. Defaults
@@ -72,6 +86,11 @@ bool Mpu6050::readAccel(vec3 &out) {
   return true;
 }
 
+bool Mpu6050::readRawAccel(vec3 &out) {
+  // CAL6-only: raw m/s², bypasses accOff_/accScale_/accel_bias.
+  return readBurst6(kAccelBase, ACCEL_LSB_O_MPS2, out);
+}
+
 void Mpu6050::getGyroBias(int samples) {
   if (samples <= 0) {
     return;
@@ -81,7 +100,7 @@ void Mpu6050::getGyroBias(int samples) {
   int ok = 0;
   for (int i = 0; i < samples; ++i) {
     delay(MPU_CALIB_DELAY_MS);
-    if (readBurst6(mpu_gyro_base, GYRO_LSB_TO_DPS, s)) {
+    if (readBurst6(kGyroBase, GYRO_LSB_TO_DPS, s)) {
       total += s;
       ++ok;
     }
@@ -101,7 +120,7 @@ void Mpu6050::getAccelBias(int samples) {
   int ok = 0;
   for (int i = 0; i < samples; ++i) {
     delay(MPU_CALIB_DELAY_MS);
-    if (readBurst6(mpu_accel_base, ACCEL_LSB_O_MPS2, s)) {
+    if (readBurst6(kAccelBase, ACCEL_LSB_O_MPS2, s)) {
       // Calibrated stream: factory scale/offset applied, runtime residual
       // excluded (accel_bias stays untouched until the new seed lands).
       s.x = (s.x - accOff_[0]) * accScale_[0];
