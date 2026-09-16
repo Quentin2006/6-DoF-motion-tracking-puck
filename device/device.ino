@@ -3,7 +3,7 @@
 #include "net.h"
 #include "led.h"
 #include "display.h"
-#include <Arduino.h>
+#include "video.h"
 
 Tracker tracker;
 Net net;
@@ -11,6 +11,7 @@ StatusLed led;
 Display display;
 unsigned long lastStatusMs = 0;
 unsigned long lastColorMs = 0;
+unsigned long videoActiveMs = 0;
 uint8_t colorIdx = 0;
 
 void setup() {
@@ -40,8 +41,10 @@ void setup() {
     Serial.read();
   }
   tracker.seedEKF();
+  if (!net.beginVideo(VIDEO_UDP_PORT)) {
+    Serial.println("video bind failed; tracking-only");
+  }
   (void)display.begin(); // best-effort: tracking is authoritative, panel advisory
-  display.fill(ST77XX_RED);
   lastColorMs = millis();
   led.green(); // calibrated, streaming
   lastStatusMs = millis();
@@ -58,6 +61,21 @@ void loop() {
       break;
     case Tracker::Step::Skip:
       break;
+  }
+  // Video: one datagram per loop max (never a drain — starves 500 Hz fusion).
+  // Chunks overwrite in place; loss tears, next frame_id keeps overwriting.
+  {
+    VideoChunkHdr hdr;
+    uint8_t buf[VIDEO_PAYLOAD_MAX];
+    int n = net.pollVideoChunk(buf, hdr);
+    if (n > 0) {
+      videoActiveMs = millis();
+      int rows = n / (VIDEO_W * 2);
+      int y0 = (int)hdr.idx * 3;
+      if (rows > 0 && y0 + rows <= VIDEO_H && n == (int)hdr.len) {
+        display.writeChunk(0, y0, VIDEO_W, rows, (const uint16_t *)buf);
+      }
+    }
   }
   unsigned long nowMs = millis();
   if ((unsigned long)(nowMs - lastStatusMs) >= 1000UL) {
@@ -91,7 +109,9 @@ void loop() {
     Serial.println(tracker.stillLatch() ? 1 : 0);
     tracker.resetGated();
   }
-  if ((unsigned long)(nowMs - lastColorMs) >= DISPLAY_COLOR_PERIOD_MS) {
+  // RGB demo resumes only after 10 s of video silence so it never fights video.
+  if ((unsigned long)(nowMs - lastColorMs) >= DISPLAY_COLOR_PERIOD_MS &&
+      (unsigned long)(nowMs - videoActiveMs) > 10000UL) {
     lastColorMs = nowMs;
     colorIdx = (uint8_t)((colorIdx + 1) % 3);
     const uint16_t c = (colorIdx == 0) ? ST77XX_RED : (colorIdx == 1) ? ST77XX_GREEN : ST77XX_BLUE;
