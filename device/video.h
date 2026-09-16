@@ -4,7 +4,7 @@
 #include <cstring>
 
 // Video wire contract: engine -> device raw 320x240 RGB565 frame fragments.
-// Landscape-inverted (90 deg CCW from portrait 0).
+// Landscape (90 deg CW from portrait 0).
 // Quat stream (packet.h, UDP 3333) untouched; this rides a dedicated port.
 constexpr uint16_t VIDEO_UDP_PORT = 3334;
 constexpr int VIDEO_W = 320;
@@ -13,7 +13,7 @@ constexpr size_t VIDEO_FRAME_BYTES = 153600; // 320*240*2
 constexpr size_t VIDEO_PAYLOAD_MAX = 1280;   // 2 rows x 320 px x 2 B
 constexpr uint16_t VIDEO_CHUNKS = 120;       // 120 x 1280 (all equal)
 constexpr size_t VIDEO_TAIL_BYTES = 1280;    // 2 rows x 320 px x 2 B
-constexpr uint8_t VIDEO_ROTATION = 3;        // landscape-inverted logical space
+constexpr uint8_t VIDEO_ROTATION = 1;        // landscape logical space
 constexpr size_t VIDEO_HDR_LEN = 8;
 
 // Header (8 B, all u16 LE): frame_id | chunk_idx | chunk_count | payload_len.
