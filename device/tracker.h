@@ -1,4 +1,5 @@
 #pragma once
+#include "cal.h"
 #include "config.h"
 #include "mpu6050.h"
 #include "fusion.h"
@@ -12,7 +13,8 @@ public:
   void calibrate();                  // mpu_.getAccelBias(GYRO_CALIB_SAMPLES) + getGyroBias(...)
   void printAccelCal();              // getAccelCal() then print off/scale (persistence proof)
   void seedEKF();                    // mpu_.readGyro -> ekf_.begin(gbRps)
-  Mpu6050 &mpu() { return mpu_; }    // for AccelCalibrator.run()
+  // Setup-time only: if "CAL6" arrives within timeoutMs, run blocking 6-pose cal on mpu_; true = trigger seen.
+  bool maybeRunAccelCal(unsigned long timeoutMs);
 
   // One 500 Hz tick. Skip = scheduler chose not to run (overrun or too soon).
   // Processed = full pipeline ran, quat()/gyro()/outputs valid -> caller sends.
@@ -28,11 +30,11 @@ public:
   uint32_t overruns() const { return overruns_; }
   uint32_t gated() const { return gated_; }
   void resetGated() { gated_ = 0; }
-
 private:
   Mpu6050 mpu_;
   Ekf6Dof ekf_;
   StillDetector still_;
+  AccelCalibrator cal_;
   float quat_[4] = {0, 0, 0, 1};     // x,y,z,w display frame
   float gyro_[3] = {0, 0, 0};        // body-frame rad/s
   uint32_t ticks_ = 0, overruns_ = 0, gated_ = 0;

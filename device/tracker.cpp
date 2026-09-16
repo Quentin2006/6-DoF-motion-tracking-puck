@@ -43,6 +43,12 @@ void Tracker::printAccelCal() {
   Serial.println(accScale[2], 4);
 }
 
+bool Tracker::maybeRunAccelCal(unsigned long timeoutMs) {
+  if (!cal_.awaitTrigger(timeoutMs)) return false;
+  cal_.run(mpu_);
+  return true;
+}
+
 void Tracker::seedEKF() {
   vec3 gb;
   mpu_.readGyro(gb);

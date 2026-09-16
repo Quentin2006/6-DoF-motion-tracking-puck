@@ -1,14 +1,12 @@
 #include "config.h"
 #include "tracker.h"
 #include "net.h"
-#include "cal.h"
 #include "led.h"
 #include "display.h"
 #include <Arduino.h>
 
 Tracker tracker;
 Net net;
-AccelCalibrator cal;
 StatusLed led;
 Display display;
 unsigned long lastStatusMs = 0;
@@ -37,9 +35,7 @@ void setup() {
   Serial.println("calibrated");
   tracker.printAccelCal();
   Serial.println("send CAL6 within 5 s for accel cal");
-  if (cal.awaitTrigger(5000UL)) {
-    cal.run(tracker.mpu());
-  }
+  (void)tracker.maybeRunAccelCal(5000UL);
   while (Serial.available() > 0) {
     Serial.read();
   }
