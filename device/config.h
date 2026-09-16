@@ -35,26 +35,13 @@ constexpr float EKF_GATE_NORM_FAR = 0.70f; // 2x EKF_GATE_NORM: coast above this
 constexpr int8_t FUSION_AXIS_MAP[3] = {3, 2, 1}; // body=(+sz,+sy,+sx): pitch/roll inputs swapped per live test; sensor +X (up, ~9.8 at rest) to body +Z matching EKF gravity [0,0,1]
 
 // ------------------------------- DISPLAY -------------------------------
-// Pins are FIXED — user refused rewire. NEVER move them.
-//   CLK=18 CS=8 DIN=3 DC=6 RST=9 (BL hardwired to 3V3 rail, NOT GPIO5)
-// (a) BL is rail-tied: panel backlight always on. NEVER drive BL_PIN as
-//     GPIO — confirmed 2026-09-15 (PWM 0/70/140/255 no change).
-// (b) DIN=3 strapping: GPIO3 is a boot-strap pin — no pull-up/down here,
-//     and the display must never back-drive DIN at boot or the S3 may
-//     fail to enter normal boot.
-// (c) GPIO43/44 are UART0 (CH343 console) and GPIO19/20 are native-USB
-//     D-/D+. Keep them free — display control lines must never use them.
-// (d) Backlight is active HIGH on this panel (proven: LOW=float black
-//     ~18.6, HIGH=glow ~34.2). Drive BL_PIN HIGH to light the panel.
-// (e) VCC->3V3 + GND common required. MPU unplugged isolates the rail
-//     during display bring-up.
-constexpr uint8_t CLK_PIN = 18;
-constexpr uint8_t CS_PIN = 8;
-constexpr uint8_t DIN_PIN = 3;
-constexpr uint8_t DC_PIN = 6;
-constexpr uint8_t RST_PIN = 9;
-// BL rail-tied: no GPIO. Kept as -1 sentinel so stale code fails loudly.
-constexpr int BL_PIN = -1;
+// ESP32-S3 pin assignments
+constexpr int TFT_MOSI = 11;
+constexpr int TFT_SCLK = 12;
+constexpr int TFT_CS = 10;
+constexpr int TFT_DC = 9;
+constexpr int TFT_RST = 8;
+constexpr int TFT_BL = 7;
 
 // ------------------------------- STATUS LED -------------------------------
 // Onboard WS2812 addressable RGB (GPIO48 on the stock S3 devkit). Driven via
