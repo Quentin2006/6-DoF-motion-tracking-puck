@@ -7,19 +7,10 @@
 constexpr int SDA_PIN = 5;
 constexpr int SCL_PIN = 4;
 
-constexpr int MPU_ADDR = 0x68;
-constexpr int MPU_PWR_MGMT_1_REG = 0x6B;
-constexpr uint8_t MPU_ACCEL_BASE = 0x3B;
-constexpr uint8_t MPU_GYRO_BASE = 0x43;
-constexpr uint8_t MPU_WHO_AM_I_REG = 0x75;
-constexpr uint8_t MPU_WHO_AM_I_EXPECT = 0x68;
-constexpr uint8_t MPU_WHO_AM_I_EXPECT_ALT = 0x74; // observed clone ID; registers match MPU-6050 map
-constexpr uint8_t MPU_SMPLRT_DIV_REG = 0x19;
-constexpr uint8_t MPU_CONFIG_REG = 0x1A;
-constexpr uint8_t MPU_GYRO_CONFIG_REG = 0x1B;
-constexpr uint8_t MPU_ACCEL_CONFIG_REG = 0x1C;
-constexpr uint8_t MPU_SMPLRT_DIV_VAL = 0x00;   // 1 kHz when DLPF enabled
-constexpr uint8_t MPU_CONFIG_VAL = 0x01;       // DLPF 184 Hz gyro / 188 Hz accel, 1 kHz
+constexpr int MPU_ADDR = 0x68; // AD0 low; register map lives in mpu6050.cpp
+constexpr uint8_t MPU_SMPLRT_DIV_VAL = 0x00; // 1 kHz when DLPF enabled
+constexpr uint8_t MPU_CONFIG_VAL =
+    0x01; // DLPF 184 Hz gyro / 188 Hz accel, 1 kHz
 constexpr uint8_t MPU_GYRO_CONFIG_VAL = 0x18;  // FS_SEL=3 → ±2000 dps
 constexpr uint8_t MPU_ACCEL_CONFIG_VAL = 0x10; // AFS_SEL=2 → ±8 g
 constexpr int MPU_CALIB_DELAY_MS = 5;

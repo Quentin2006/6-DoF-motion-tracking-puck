@@ -32,12 +32,13 @@ struct vec3 {
 
 class Mpu6050 {
 public:
-  Mpu6050(); // trivial: init addr/sda/scl/bases, zero biases; NO I2C
+  Mpu6050(); // trivial: init addr/sda/scl, zero biases; NO I2C
 
   bool begin(); // Wire.begin(sda,scl), wake, verify, configure; false on failure
 
   bool readGyro(vec3 &out);  // dps, bias-corrected, NO dt scaling
   bool readAccel(vec3 &out); // m/s², cal-scale + bias-corrected, NO dt scaling
+  bool readRawAccel(vec3 &out); // m/s², bypasses all cal; CAL6-only, no I2C beyond burst
 
   void getGyroBias(int samples);
   void getAccelBias(int samples);
@@ -54,7 +55,6 @@ private:
 
   uint8_t addr;
   int sda, scl;
-  uint8_t mpu_gyro_base, mpu_accel_base;
   vec3 gyro_bias, accel_bias;
   float accOff_[3] = {0, 0, 0};     // m/s² per-axis offset (6-point cal)
   float accScale_[3] = {1, 1, 1};   // dimensionless per-axis scale

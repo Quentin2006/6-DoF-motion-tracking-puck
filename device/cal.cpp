@@ -1,5 +1,5 @@
 #include "cal.h"
-#include <Wire.h>
+#include "config.h"
 
 // Wait up to timeoutMs for a serial line; trims CR/LF. Returns true on line.
 bool AccelCalibrator::waitLine(String &line, unsigned long timeoutMs) {
@@ -19,25 +19,6 @@ bool AccelCalibrator::waitLine(String &line, unsigned long timeoutMs) {
   }
   line.trim();
   return line.length() > 0;
-}
-
-// Raw burst read of the accel registers in m/s^2, bypassing any driver
-// calibration (no accOff_/accScale_/accel_bias). Used only by the CAL6
-// one-time procedure. Returns false on I2C failure.
-bool AccelCalibrator::readRawAccel(vec3 &out) {
-  Wire.beginTransmission(MPU_ADDR);
-  Wire.write(MPU_ACCEL_BASE);
-  if (Wire.endTransmission(false) != 0) return false;
-  if (Wire.requestFrom(MPU_ADDR, (uint8_t)6) != 6) return false;
-  uint8_t b[6];
-  for (int i = 0; i < 6; ++i) b[i] = Wire.read();
-  int16_t xr = (int16_t)(((uint16_t)b[0] << 8) | b[1]);
-  int16_t yr = (int16_t)(((uint16_t)b[2] << 8) | b[3]);
-  int16_t zr = (int16_t)(((uint16_t)b[4] << 8) | b[5]);
-  out.x = (float)xr * ACCEL_LSB_O_MPS2;
-  out.y = (float)yr * ACCEL_LSB_O_MPS2;
-  out.z = (float)zr * ACCEL_LSB_O_MPS2;
-  return true;
 }
 
 bool AccelCalibrator::awaitTrigger(unsigned long timeoutMs) {
@@ -65,7 +46,7 @@ void AccelCalibrator::run(Mpu6050 &mpu) {
     unsigned long t0 = millis();
     while ((unsigned long)(millis() - t0) < 5000UL) {
       vec3 s;
-      if (readRawAccel(s)) {
+      if (mpu.readRawAccel(s)) {
         total += s;
         ++n;
       }

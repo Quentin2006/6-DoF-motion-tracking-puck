@@ -1,5 +1,4 @@
 #pragma once
-#include "config.h"
 #include "mpu6050.h"
 #include <Arduino.h>
 
@@ -12,5 +11,4 @@ public:
   void run(Mpu6050 &mpu);
 private:
   static bool waitLine(String &line, unsigned long timeoutMs);
-  static bool readRawAccel(vec3 &out);
 };
