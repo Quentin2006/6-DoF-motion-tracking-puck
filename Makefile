@@ -1,4 +1,4 @@
-.PHONY: all compile upload monitor engine device
+.PHONY: all compile upload monitor engine device test
 FQBN ?= esp32:esp32:esp32s3
 
 all: compile upload engine
@@ -17,3 +17,12 @@ lsp:
 
 engine:
 	cd engine && cargo run
+
+# Cross-contract + engine tests. The C++ host test asserts the firmware packet
+# producer (device/packet.h) matches tests/packet_fixture.txt; cargo test asserts
+# the engine parser matches the same bytes. Requires a host g++.
+test:
+	mkdir -p build
+	g++ -std=c++17 -Idevice tests/packet_test.cpp -o build/packet_test
+	./build/packet_test tests/packet_fixture.txt
+	cd engine && cargo test

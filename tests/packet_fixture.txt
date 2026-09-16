@@ -1,0 +1,5 @@
+# Golden bytes for the v2 tracking packet (36 B, little-endian).
+# Logical values: seq=42, stamp=1000, quat=(x,y,z,w)=(0,0,0,1), gyro=(0.5,-0.25,1.5) rad/s.
+# Single source of truth: engine/src/tracking.rs (consumer) and tests/packet_test.cpp
+# (producer) both decode/encode against this exact string.
+2a000000e80300000000000000000000000000000000803f0000003f000080be0000c03f

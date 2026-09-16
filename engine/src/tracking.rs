@@ -5,8 +5,9 @@ use bevy::prelude::*;
 #[derive(Resource)]
 struct Socket(UdpSocket);
 
+// Marker for the camera rig driven by the tracking puck (look-around).
 #[derive(Component)]
-struct Puck;
+struct LookRig;
 
 // must match device/config.h UDP_PORT
 const UDP_PORT: u16 = 3333;
@@ -20,9 +21,9 @@ const PACKET_LEN_V2: usize = 36;
 const PREDICT_TAU_S: f32 = 0.008;
 const SMOOTH_TAU_S: f32 = 0.006;
 
-pub struct CubePlugin;
+pub struct TrackPlugin;
 
-impl Plugin for CubePlugin {
+impl Plugin for TrackPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, (setup_world, setup_socket));
         app.add_systems(Update, update);
@@ -51,7 +52,11 @@ fn header(raw: &[u8]) -> (u32, u32) {
 
 fn parse_v1(raw: &[u8]) -> (u32, u32, Quat) {
     let (seq, stamp) = header(raw);
-    (seq, stamp, Quat::from_xyzw(f(raw, 8), f(raw, 12), f(raw, 16), f(raw, 20)))
+    (
+        seq,
+        stamp,
+        Quat::from_xyzw(f(raw, 8), f(raw, 12), f(raw, 16), f(raw, 20)),
+    )
 }
 
 fn parse_v2(raw: &[u8]) -> (u32, u32, Quat, Vec3) {
@@ -63,7 +68,7 @@ fn parse_v2(raw: &[u8]) -> (u32, u32, Quat, Vec3) {
 }
 
 fn update(
-    query: Single<&mut Transform, With<Puck>>,
+    camera: Single<&mut Transform, With<LookRig>>,
     socket: Res<Socket>,
     mut last_seq: Local<Option<u32>>,
     mut last_applied: Local<Option<Quat>>,
@@ -96,14 +101,10 @@ fn update(
             }
         }
         *last_seq = Some(seq);
-        // Only overwrite when the packet carried gyro (v2).
-        if let Some(w) = gyro {
-            *last_gyro = Some(w);
-        }
 
         // Predict forward by PREDICT_TAU_S in the body frame (right-multiply).
         // Legacy v1 packets carry no gyro, so they skip prediction.
-        let q_show = match gyro {
+        let unnorm = match gyro {
             Some(w) => {
                 let ang = w.length() * PREDICT_TAU_S;
                 if ang > 1e-6 {
@@ -115,14 +116,14 @@ fn update(
             None => q,
         };
 
-        let dt_render = time.delta_secs();
-        let alpha = (1.0 - (-dt_render / SMOOTH_TAU_S).exp()).clamp(0.0, 1.0);
+        let alpha = (1.0 - (-time.delta_secs() / SMOOTH_TAU_S).exp()).clamp(0.0, 1.0);
         let q_out = match *last_applied {
-            Some(p) => p.slerp(q_show, alpha).normalize(),
-            None => q_show.normalize(),
-        };
+            Some(p) => p.slerp(unnorm, alpha),
+            None => unnorm,
+        }
+        .normalize();
 
-        query.into_inner().rotation = q_out;
+        camera.into_inner().rotation = q_out;
         *last_applied = Some(q_out);
     }
 }
@@ -132,17 +133,85 @@ fn setup_world(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
+    // Static reference object so the camera rig's motion is visible.
     commands.spawn((
-        Puck,
         Mesh3d(meshes.add(Cuboid::new(2.9 / 2., 0.1 / 2., 5.7 / 2.))),
         MeshMaterial3d(materials.add(Color::srgb(0.3, 0.5, 0.8))),
-        Transform::from_xyz(0.0, 0.5, 0.0),
+        Transform::from_xyz(0.0, 0.5, -6.0),
     ));
 
     commands.spawn((PointLight::default(), Transform::from_xyz(4.0, 8.0, 4.0)));
 
+    // The puck drives this camera rig. Quaternion maps directly to orientation;
+    // translation stays at the eye position. Rest quat (identity) looks down -Z,
+    // so the reference object sits in front of it.
     commands.spawn((
+        LookRig,
         Camera3d::default(),
-        Transform::from_xyz(-2.0, 2.5, 5.0).looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(0.0, 1.5, 0.0),
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Shared byte-level fixture: the committed tests/packet_fixture.txt is the
+    // single source of truth for the v2 wire layout, also asserted by the C++
+    // producer test (tests/packet_test.cpp) against the same bytes.
+    const FIXTURE: &str = include_str!("../../tests/packet_fixture.txt");
+
+    fn fixture_hex() -> &'static str {
+        FIXTURE
+            .lines()
+            .find(|l| {
+                let t = l.trim();
+                !t.is_empty() && !t.starts_with('#')
+            })
+            .unwrap()
+            .trim()
+    }
+
+    fn hex_bytes(s: &str) -> Vec<u8> {
+        let clean: String = s.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        clean
+            .as_bytes()
+            .chunks(2)
+            .map(|ch| u8::from_str_radix(std::str::from_utf8(ch).unwrap(), 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn parse_v2_roundtrips_the_committed_fixture() {
+        let bytes = hex_bytes(fixture_hex());
+        assert_eq!(bytes.len(), PACKET_LEN_V2);
+        let (seq, stamp, q, gyro) = parse_v2(&bytes);
+        assert_eq!((seq, stamp), (42, 1000));
+        assert_eq!(q, Quat::from_xyzw(0.0, 0.0, 0.0, 1.0));
+        let e = gyro - Vec3::new(0.5, -0.25, 1.5);
+        assert!(e.length() < 1e-6, "gyro mismatch: {gyro:?}");
+    }
+
+    #[test]
+    fn parse_v1_roundtrips_identity_quat() {
+        // v1: seq | stamp | quat xyzw (24 bytes), no gyro.
+        let mut b = Vec::new();
+        for v in [42u32.to_le_bytes(), 1000u32.to_le_bytes()] {
+            b.extend_from_slice(&v);
+        }
+        for v in [0.0f32, 0.0f32, 0.0f32, 1.0f32] {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        let (seq, stamp, q) = parse_v1(&b);
+        assert_eq!((seq, stamp), (42, 1000));
+        assert_eq!(q, Quat::from_xyzw(0.0, 0.0, 0.0, 1.0));
+    }
+
+    #[test]
+    fn header_decodes_seq_and_stamp_little_endian() {
+        let mut b = Vec::new();
+        b.extend_from_slice(&42u32.to_le_bytes());
+        b.extend_from_slice(&1000u32.to_le_bytes());
+        assert_eq!(header(&b), (42, 1000));
+    }
 }

@@ -5,6 +5,6 @@ use bevy::prelude::*;
 fn main() {
     App::new()
         .add_plugins(DefaultPlugins)
-        .add_plugins(tracking::CubePlugin)
+        .add_plugins(tracking::TrackPlugin)
         .run();
 }

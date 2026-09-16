@@ -30,8 +30,11 @@ constexpr float GRAVITY_MPS2 = 9.80665f;
 constexpr uint16_t UDP_PORT = 3333;      // must match engine/src/tracking.rs UDP_PORT
 constexpr int FUSION_RATE_HZ = 500;
 constexpr float DPS_TO_RPS = 3.14159265f / 180.0f; // deg/s to rad/s
-constexpr size_t QUAT_PACKET_SIZE = 24;  // seq u32 + micros u32 + xyzw f32 LE
-constexpr size_t QUAT_PACKET_SIZE_V2 = 36; // seq+stamp+xyzw+gyro xyz LE
+// Packet layout is canonical in packet.h (host-compilable, tested by
+// tests/packet_test.cpp). These aliases keep the firmware's historical names.
+#include "packet.h"
+constexpr size_t QUAT_PACKET_SIZE = QUAT_PACKET_LEN_V1;   // seq u32 + micros u32 + xyzw f32 LE
+constexpr size_t QUAT_PACKET_SIZE_V2 = QUAT_PACKET_LEN_V2; // seq+stamp+xyzw+gyro xyz LE
 constexpr float EKF_SIGMA_GYRO = 0.002f;   // rad/s/sqrt(Hz): ±2000dps FSR stationary floor ±0.15 dps; quant 0.061 dps/LSB adds 0.018 dps rms (RSS 0.151) — negligible vs electronic noise, value holds
 constexpr float EKF_SIGMA_BG = 5.0e-06f;   // rad/s^2/sqrt(Hz): bias random walk, one decade below gyro over 100 s drift
 constexpr float EKF_SIGMA_ACCEL = 0.02f;   // normalized-accel units (~0.2 m/s²): ±8g quant 0.0024 m/s²/LSB far below; value holds. If tilt lags, raise x1.5 — never touch filter code
@@ -61,6 +64,16 @@ constexpr uint8_t DC_PIN = 6;
 constexpr uint8_t RST_PIN = 9;
 // BL rail-tied: no GPIO. Kept as -1 sentinel so stale code fails loudly.
 constexpr int BL_PIN = -1;
+
+// ------------------------------- STATUS LED -------------------------------
+// Onboard WS2812 addressable RGB (GPIO48 on the stock S3 devkit). Driven via
+// the core's rgbLedWrite(pin, R, G, B) (GRB reordered internally). Used as a
+// calibration/debug light: red while calibrating, green when done.
+#ifdef RGB_BUILTIN
+constexpr int RGB_LED_PIN = RGB_BUILTIN;
+#else
+constexpr int RGB_LED_PIN = 48; // onboard WS2812 on most S3 boards
+#endif
 
 // WiFi credentials live in secrets.h (gitignored, see secrets.h.example).
 #include "secrets.h"
