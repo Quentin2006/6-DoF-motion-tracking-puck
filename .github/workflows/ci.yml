@@ -13,6 +13,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # Bevy cold-builds in ~36 min on the 2-vCPU runner; cache the engine's
+      # target dir + cargo registry so subsequent runs are near-instant.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
       - name: Install Linux system deps (Bevy)
         run: |
           sudo apt-get update
