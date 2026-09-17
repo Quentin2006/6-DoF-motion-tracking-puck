@@ -21,17 +21,17 @@ Two independent halves, no shared code, wired together by a single root
  MPU6050 (I2C SDA=5 SCL=4 @400kHz)
    │  readGyro() dps + readAccel() m/s²   (mpu6050.cpp: cal offset/scale + bias)
    ▼
- Tracker::step(dt)  (tracker.cpp)
-   │  selAxis(FUSION_AXIS_MAP) → body frame; body-accel norm
+ Tracker::step()  (tracker.cpp)
+   │  toBody(FUSION_AXIS_MAP) → body frame; body-accel norm
    ├─ StillDetector::update(driver-frame gyro + norm) → Mpu6050.nudgeGyroBias (clamped 0.002 dps/tick)
    ├─ Ekf6Dof::predict(gyro rad/s) → Ekf6Dof::updateAccel(accel)  [gated → gated_++]
    └─ wrap to display quat  q_disp = QW_ALIGN * q_ekf * QB_ALIGN   (right-multiply)
    ▼
- device.ino loop() → Net::sendQuat(quat, gyro, micros())
+ device.ino loop() → Net::sendQuat(quat, gyro)
    │  36-byte packet: seq u32 | stamp u32 | quat xyzw f32 | gyro xyz f32  (all LE)
    ▼
  engine/src/tracking.rs::update  (UDP 0.0.0.0:3333, drain-to-latest)
-   │  parse v1 (24 B) / v2 (36 B) → predict forward (PREDICT_TAU_S) → slerp smooth (SMOOTH_TAU_S)
+   │  parse v2 (36 B) → predict forward (PREDICT_TAU_S) → slerp smooth (SMOOTH_TAU_S)
    ▼
  LookRig camera Transform.rotation
 ```
@@ -40,16 +40,14 @@ Two independent halves, no shared code, wired together by a single root
 
 | File | Role |
 |---|---|
-| `device.ino` | Orchestrator: `setup()` init/calib, `loop()` fixed `dt = 1/500` step + 1 s status line |
+| `device.ino` | Orchestrator: `setup()` init/calib, 10-line `loop()` (tick → send → video chunk → report → panel tick) |
 | `config.h` | Single source of all compile-time constants (pins, FSR, gravity, UDP port, all EKF sigmas/gates, axis map, display pins) |
-| `tracker.{h,cpp}` | Pipeline glue + `micros()` scheduler; owns `Mpu6050`, `Ekf6Dof`, `StillDetector` |
+| `tracker.{h,cpp}` | Pipeline glue + `micros()` scheduler + CAL6 accelerometer calibration + 1 Hz status line; owns `Mpu6050`, `Ekf6Dof`, `StillDetector` |
 | `mpu6050.{h,cpp}` | I2C driver + NVS accel-cal persistence (`Preferences`, namespace `mpu`, keys `ax0-2`/`as0-2`) |
 | `fusion.{h,cpp}` | `Ekf6Dof` — 6-state EKF (quat w,x,y,z + gyro bias) |
 | `still_detect.{h,cpp}` | `StillDetector` — gyro re-bias while stationary (50-tick window, variance/norm gates) |
 | `net.{h,cpp}` | WiFi STA + `WiFiUDP`, 36 B packet, alternator for ~250 Hz |
 | `packet.h` | Canonical 36 B UDP wire layout + `build_quat_packet()` — host-compilable, single source of the byte contract |
-| `cal.{h,cpp}` | `AccelCalibrator` — one-time serial-guided 6-pose (`CAL6`) accel calibration |
-| `led.{h,cpp}` | `StatusLed` — onboard WS2812: red = calibrating/booting, green = streaming |
 | `secrets.h` / `secrets.h.example` | WiFi credentials (`WIFI_SSID`, `WIFI_PASSWORD`, `ENGINE_IP`) |
 
 **Key module (`engine/`)**
@@ -61,16 +59,16 @@ Two independent halves, no shared code, wired together by a single root
 
 **Cross-file wire contract (edit both halves together).** `device/config.h` and
 `engine/src/tracking.rs` hard-code the same UDP protocol by hand; there is no
-shared crate or serializer. `UDP_PORT = 3333` and packet sizes `24` (v1, no
-gyro) / `36` (v2, +gyro) **must match in both files**. `config.h` even notes
-"must match engine/src/tracking.rs UDP_PORT". Both x86 and ESP32 are
-little-endian, so no byte-swapping is done.
+shared crate or serializer. `UDP_PORT = 3333` and the 36-byte packet size
+**must match in both files**. `config.h` even notes "must match
+engine/src/tracking.rs UDP_PORT". Both x86 and ESP32 are little-endian, so no
+byte-swapping is done.
 
 The packet byte layout is **canonical in `device/packet.h`**
 (`build_quat_packet`, host-compilable, no Arduino deps); `net.cpp` calls it and
-`config.h` aliases its length constants. The committed `tests/packet_fixture.txt`
+names `QUAT_PACKET_LEN_V2` directly. The committed `tests/packet_fixture.txt`
 is the single source of truth and is asserted by **both** halves — the C++ host
-test (`tests/packet_test.cpp`, producer) and the Rust parser tests
+test (`tests/packet_test.cpp`, producer) and the Rust parser test
 (`tracking.rs`, consumer). Changing the packet layout means updating
 `device/packet.h`, `tests/packet_fixture.txt`, and the parser — any one-sided
 edit fails `make test`.
@@ -98,7 +96,7 @@ make monitor          # serial monitor @115200 (uses device/sketch.yaml port/bau
 make device           # compile + upload + monitor  (interactive loop)
 make engine           # cd engine && cargo run      (host Bevy visualizer)
 make all              # compile + upload + engine   (full pipeline)
-make clean            # arduino-cli compile --clean device
+make clean            # arduino-cli compile --clean --fqbn $(FQBN) device
 make lsp              # regenerate + rewrite compile_commands.json for clangd
 make test             # cargo test (engine) + host packet-contract test (device/packet.h vs tests/packet_fixture.txt)
 ```
@@ -112,13 +110,12 @@ make test             # cargo test (engine) + host packet-contract test (device/
 
 **C++ (device/)**
 - `#pragma once` (never include guards); lowercase `.h`/`.cpp` (except `device.ino`).
-- Classes `PascalCase` (`Tracker`, `Ekf6Dof`, `Mpu6050`, `StillDetector`, `Net`, `AccelCalibrator`, `StatusLed`); methods/members `camelCase`; private members trailing `_` (`quat_`, `pktSeq_`, `lastTickUs_`).
+- Classes `PascalCase` (`Tracker`, `Ekf6Dof`, `Mpu6050`, `StillDetector`, `Net`, `Display`); methods/members `camelCase`; private members trailing `_` (`quat_`, `pktSeq_`, `lastTickUs_`).
 - Constants: `UPPER_SNAKE` for macros/constexpr (`SDA_PIN`, `FUSION_RATE_HZ`, `EKF_GATE_MAHA`); `k`-prefixed class-private `static constexpr` (`kWinTicks`, `kAlpha`).
-- `enum class Step { Skip, Processed, Failed }` (scoped).
 - 2-space indent; braces same line; space inside parens `if (cond)`. Avoid C-style casts.
 - **Error handling:** deterministic fail-stop — `setup()` hangs in `while(true) delay()` if MPU init or WiFi fails; no soft degradation. NVS accel-cal is fault-tolerant (missing → identity defaults, silent no-op). CAL6 is abort-safe (only the SAVE writes NVS). NaN treated as failure via `!(x < th)` / `== 0` guards.
 - **Filter tuning:** EKF sigmas/gates live in `config.h`; comments say to tune constants rather than touch the filter code.
-- `config.h` display pins are **FIXED** (`CLK=18 CS=8 DIN=3 DC=6 RST=9`, `BL=-1` rail-tied) with extensive comments on hardware traps — do not move them, and `BL` must never be driven as GPIO.
+- `config.h` display pins are **FIXED** (`TFT_MOSI=11 TFT_SCLK=12 TFT_CS=10 TFT_DC=9 TFT_RST=8`) with extensive comments on hardware traps — do not move them. `TFT_BL=7` is driven HIGH once in `Display::begin()` (backlight on).
 
 **Rust (engine/)**
 - Minimal crate: no `lib.rs`, no modules beyond `tracking`, no async, no serde — just Bevy + `std::net::UdpSocket`.
@@ -131,7 +128,7 @@ make test             # cargo test (engine) + host packet-contract test (device/
 
 - `device/config.h` — every compile-time constant and the wire-contract sizes. The file any hardware/fusion change lands in.
 - `device/packet.h` — canonical UDP packet layout + `build_quat_packet()`; the byte contract's single source (host-testable).
-- `device/device.ino` — the boot + loop sequencing (init → calib → CAL6 gate → seedEKF → stream).
+- `device/device.ino` — the boot + loop sequencing (init → calib → CAL6 gate → start → stream).
 - `device/tracker.cpp` — the per-tick pipeline (scheduler, axis remap, still-detect nudge, EKF predict/update, display-quat wrap).
 - `engine/src/tracking.rs` — the packet parser, prediction/smoothing, and camera rig.
 - `Makefile` — the whole build/dev entry surface.
@@ -186,9 +183,9 @@ automated tests guard the cross-half packet contract; functional/IMU
 verification stays manual.
 
 - **`make test`** runs both halves against the same committed fixture:
-  1. **Engine parser tests** (`engine/src/tracking.rs`, `#[cfg(test)]`) — decode
-     `tests/packet_fixture.txt` and assert `parse_v1` / `parse_v2` / `header`
-     recover the logical values (consumer half).
+  1. **Engine parser test** (`engine/src/tracking.rs`, `#[cfg(test)]`) — decode
+     `tests/packet_fixture.txt` and assert `parse_v2` recovers the logical values
+     (consumer half).
   2. **C++ producer test** (`tests/packet_test.cpp`, host `g++`) — build a v2
      packet with `build_quat_packet` and assert the bytes equal the same fixture
      (producer half).
@@ -203,9 +200,10 @@ verification stays manual.
 **Still manual / no automation:**
 - **Compile gate** locally: `make compile` — keep green after any `device/` change.
 - **On-device:** `make upload` + `make monitor` = the interactive loop. The serial
-  CAL6 procedure (`device/cal.cpp`) calibrates the accelerometer (6 poses);
-  `device/still_detect.cpp` re-biases gyro while still. Status LED goes red→green
-  once streaming; `q`/`seq`/`tick`/`over`/`gate`/`bg`/`st` line prints each second.
+  CAL6 procedure (`Tracker::maybeRunAccelCal` / `runAccelCal` in `tracker.cpp`)
+  calibrates the accelerometer (6 poses); `device/still_detect.cpp` re-biases
+  gyro while still. The onboard LED goes red→green once streaming; the 1 Hz
+  `q`/`seq`/`tick`/`over`/`gate`/`bg`/`st` line comes from `Tracker::report`.
 - **Host render:** `make engine` binds UDP `0.0.0.0:3333` and renders the rig.
 
 There is **no** unit coverage for `Ekf6Dof`, `StillDetector`, or `Mpu6050` — they
