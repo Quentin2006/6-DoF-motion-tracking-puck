@@ -25,7 +25,6 @@ public:
   const float *gyro() const { return gyro_; }   // body-frame gyro rad/s (valid after Processed)
   void bias(float &x, float &y, float &z) const;
   bool stillLatch() const { return still_.latched(); }
-  bool stillJustExited() const { return still_.justExited(); }
   uint32_t ticks() const { return ticks_; }
   uint32_t overruns() const { return overruns_; }
   uint32_t gated() const { return gated_; }

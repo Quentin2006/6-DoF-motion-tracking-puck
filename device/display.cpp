@@ -14,13 +14,6 @@ bool Display::begin() {
   return true;
 }
 
-void Display::present(const uint16_t *frame) {
-  if (!frame) {
-    return;
-  }
-  tft_.drawRGBBitmap(0, 0, frame, TFT_W, TFT_H);
-}
-
 void Display::writeChunk(int x, int y, int w, int h, const uint16_t *px) {
   if (!px || w <= 0 || h <= 0 || x < 0 || y < 0) {
     return;
