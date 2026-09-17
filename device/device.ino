@@ -26,7 +26,7 @@ void setup() {
       delay(100);
     }
   }
-  if (!net.begin(ssid, pwd, engine_ip, UDP_PORT)) {
+  if (!net.begin(WIFI_SSID, WIFI_PASSWORD)) {
     Serial.println("WiFi failed");
     while (true) {
       delay(1000);
@@ -43,7 +43,7 @@ void setup() {
     Serial.read();
   }
   tracker.start();
-  if (!net.beginVideo(VIDEO_UDP_PORT)) {
+  if (!net.beginVideo()) {
     Serial.println("video bind failed; tracking-only");
   }
   (void)display.begin(); // best-effort: tracking is authoritative, panel advisory
@@ -54,7 +54,7 @@ void setup() {
 
 void loop() {
   if (tracker.step()) {
-    net.sendQuat(tracker.quat(), tracker.gyro(), micros());
+    net.sendQuat(tracker.quat(), tracker.gyro());
   }
   // Video: one datagram per loop max (never a drain — starves 500 Hz fusion).
   // Chunks overwrite in place; loss tears, next frame_id keeps overwriting.
