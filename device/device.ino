@@ -38,9 +38,22 @@ void setup() {
 }
 
 void loop() {
-  if (tracker.step()) {
+  const unsigned long loopT0 = micros();
+  // Step 2 window instrumentation: fusion/video/report spans + drain exit
+  // reasons; link deltas vs cumulative UsbLink counters. Reset on print.
+  static uint32_t pSent = 0, pDrop = 0, pRx = 0, pCh = 0, pDec = 0;
+  static LoopWin win;
+
+  const unsigned long tFuse0 = micros();
+  const bool fresh = tracker.step();
+  const unsigned tFuse = (unsigned)(micros() - tFuse0);
+  if (fresh) {
     usbLink.sendQuat(tracker.quat(), tracker.gyro());
   }
+  if (tFuse > win.tFusionMax) {
+    win.tFusionMax = tFuse;
+  }
+
   // Video: budgeted multi-chunk drain (never drain-all — it starves 500 Hz
   // fusion). Max 16 chunks under a 1200 us budget inside one SPI
   // transaction; fusion + ~0.35 ms I2C must still fit the 2000 us tick.
@@ -50,13 +63,15 @@ void loop() {
   alignas(4) static uint16_t vidBuf[VIDEO_PAYLOAD_MAX / 2];
   constexpr int kMaxChunks = 16;
   constexpr unsigned long kBudgetUs = 1200;
-  const unsigned long t0 = micros();
+  const unsigned long tVid0 = micros();
   int n = 0;
   bool open = false;
-  while (n < kMaxChunks && (unsigned long)(micros() - t0) < kBudgetUs) {
+  bool idleExit = false;
+  while (n < kMaxChunks && (unsigned long)(micros() - tVid0) < kBudgetUs) {
     VideoChunkHdr hdr = {};
     const int got = usbLink.pollVideoChunk((uint8_t *)vidBuf, hdr);
     if (got <= 0) {
+      idleExit = true;
       break;
     }
     if (!open) {
@@ -69,6 +84,43 @@ void loop() {
   if (open) {
     display.endBurst();
   }
-  tracker.report(usbLink.sequence());
+  const unsigned tVid = (unsigned)(micros() - tVid0);
+  if (tVid > win.tVideoMax) {
+    win.tVideoMax = tVid;
+  }
+  if (idleExit) {
+    win.exitIdle++;
+    win.lastExit = 0;
+  } else if (n >= kMaxChunks) {
+    win.exitMax++;
+    win.lastExit = 2;
+  } else {
+    win.exitBudget++;
+    win.lastExit = 1;
+  }
+  win.lastN = (uint8_t)n;
+
+  const UsbWin delta{usbLink.sent() - pSent, usbLink.dropped() - pDrop,
+                     usbLink.rxBytes() - pRx, usbLink.chunks() - pCh,
+                     usbLink.decodeDrops() - pDec};
+  const unsigned long tRep0 = micros();
+  const bool printed = tracker.report(usbLink.sent(), delta, win);
+  const unsigned tRep = (unsigned)(micros() - tRep0);
+  if (printed) {
+    pSent = usbLink.sent();
+    pDrop = usbLink.dropped();
+    pRx = usbLink.rxBytes();
+    pCh = usbLink.chunks();
+    pDec = usbLink.decodeDrops();
+    win = LoopWin{};
+  }
+  // Current tRep/loop totals open the next window (report already printed).
+  if (tRep > win.tReportMax) {
+    win.tReportMax = tRep;
+  }
   display.tick(millis());
+  const unsigned loopUs = (unsigned)(micros() - loopT0);
+  if (loopUs > win.loopMax) {
+    win.loopMax = loopUs;
+  }
 }

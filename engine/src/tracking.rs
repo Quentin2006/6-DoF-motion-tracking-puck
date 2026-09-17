@@ -1,7 +1,8 @@
 use std::io::{Read as _, Write as _};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bevy::camera::RenderTarget;
 use bevy::prelude::*;
@@ -93,9 +94,39 @@ fn dirty_chunks(prev: &[u8], cur: &[u8]) -> Vec<usize> {
 const PREDICT_TAU_S: f32 = 0.008;
 const SMOOTH_TAU_S: f32 = 0.006;
 
-// Puck serial link: /dev/ttyACM0 @ 921600 (1a86:55d3 bridge: real wire speed).
+// Puck serial link: 1a86:55d3 bridge @ 921600 (real UART: baud is wire speed).
+// ttyACM* number is unstable; the by-id symlink (serial-number based) is stable.
 const DEFAULT_SERIAL_PORT: &str = "/dev/ttyACM0";
 const SERIAL_BAUD: u32 = 921600;
+
+// Stable open path: explicit PUCK_SERIAL wins, else first matching by-id node
+// (1a86 bridge today, Espressif native-CDC if the transport moves), else the
+// DEFAULT_SERIAL_PORT fallback above.
+fn puck_port_name() -> String {
+    if let Ok(name) = std::env::var("PUCK_SERIAL") {
+        if !name.is_empty() {
+            return name;
+        }
+    }
+    if let Ok(dir) = std::fs::read_dir("/dev/serial/by-id") {
+        let mut fallback: Option<String> = None;
+        for entry in dir.flatten() {
+            let n = entry.file_name().to_string_lossy().into_owned();
+            let is_bridge = n.starts_with("usb-1a86_USB_Single_Serial_");
+            let is_native = n.starts_with("usb-Espressif_USB_JTAG_serial_debug_unit_");
+            if is_bridge {
+                return format!("/dev/serial/by-id/{n}");
+            }
+            if is_native {
+                fallback = Some(format!("/dev/serial/by-id/{n}"));
+            }
+        }
+        if let Some(p) = fallback {
+            return p;
+        }
+    }
+    DEFAULT_SERIAL_PORT.into()
+}
 
 // Video stream to the puck panel: 320x240 RGB565 as FRAME_VIDEO frames.
 // Must match device/video.h VIDEO_* constants.
@@ -146,8 +177,7 @@ fn build_frame(out: &mut [u8], ty: u8, payload: &[u8]) -> usize {
 
 // Encode one dirty chunk and burst it as a FRAME_VIDEO / FRAME_VIDEO_RLE
 // frame. Raw fallback when incompressible (the RLE worst case exceeds the
-// raw size, so the comparison is strict — equal-or-larger stays raw).
-fn send_chunk(writer: &mut Box<dyn serialport::SerialPort>, id: u16, chunk: usize, bytes: &[u8]) {
+fn send_chunk(writer: &mut Box<dyn serialport::SerialPort>, id: u16, chunk: usize, bytes: &[u8]) -> usize {
     let enc = rle_encode_565(bytes);
     let (ty, body): (u8, &[u8]) = if enc.len() < VIDEO_PAYLOAD_MAX {
         (FRAME_VIDEO_RLE, &enc)
@@ -162,7 +192,11 @@ fn send_chunk(writer: &mut Box<dyn serialport::SerialPort>, id: u16, chunk: usiz
     payload[8..8 + body.len()].copy_from_slice(body);
     let mut frame = [0u8; 7 + 8 + VIDEO_PAYLOAD_MAX];
     let n = build_frame(&mut frame, ty, &payload[..8 + body.len()]);
-    let _ = writer.write_all(&frame[..n]);
+    if writer.write_all(&frame[..n]).is_ok() {
+        n
+    } else {
+        0
+    }
 }
 
 #[derive(Default)]
@@ -269,6 +303,31 @@ struct SerialLink {
     pose_rx: crossbeam_channel::Receiver<Pose>,
 }
 
+// Step 2 throughput stats: worker threads bump atomics, the 1 Hz logger in
+// `update` samples + resets. No per-packet logging (would perturb the read).
+// Shared via Arc: the Resource holds one clone, worker threads hold clones.
+#[derive(Resource, Default, Clone)]
+struct LinkStats {
+    inner: std::sync::Arc<LinkCounters>,
+}
+
+#[derive(Default)]
+struct LinkCounters {
+    poses: AtomicU64,        // reader: FRAME_POSE parsed
+    reader_drops: AtomicU64, // reader: oldest-drop discards on Full
+    readbacks: AtomicU64,    // render: on_video_readback calls
+    offered: AtomicU64,      // render: frames offered to frame_tx
+    dropped_full: AtomicU64, // render: frames returned to pool (queue full)
+    frames_sent: AtomicU64,  // sender: frames drained from frame_rx
+    dirty_sum: AtomicU64,    // sender: dirty chunks total
+    dirty_max: AtomicU64,    // sender: max dirty chunks in one frame
+    video_bytes: AtomicU64,  // sender: wire bytes via send_chunk
+    write_us_sum: AtomicU64, // sender: write_all span total (us)
+    write_us_max: AtomicU64, // sender: write_all span max (us)
+    gap_events: AtomicU64,   // update: seq gaps > 25
+    gap_lost: AtomicU64,     // update: poses skipped inside those gaps
+}
+
 // Video sender queue to the puck panel over the same CDC port.
 // The sender thread owns a cloned serial handle and paces one chunk per
 // ~833 us at 10 fps; frame_tx is 2-deep so the render thread never blocks
@@ -291,7 +350,7 @@ impl Plugin for TrackPlugin {
 }
 
 fn open_puck_port() -> Box<dyn serialport::SerialPort> {
-    let name = std::env::var("PUCK_SERIAL").unwrap_or_else(|_| DEFAULT_SERIAL_PORT.into());
+    let name = puck_port_name();
     serialport::new(&name, SERIAL_BAUD)
         .timeout(Duration::from_millis(50))
         .open()
@@ -324,8 +383,10 @@ fn parse_pose(raw: &[u8]) -> Pose {
 fn update(
     camera: Single<&mut Transform, With<LookRig>>,
     link: Res<SerialLink>,
+    stats: Res<LinkStats>,
     mut last_seq: Local<Option<u32>>,
     mut last_applied: Local<Option<Quat>>,
+    mut last_log: Local<Option<Instant>>,
     time: Res<Time>,
 ) {
     // Drain to latest: only the newest pose is displayed, so everything but
@@ -347,9 +408,40 @@ fn update(
         let lost = pose.seq.wrapping_sub(prev.wrapping_add(1));
         if lost > 25 {
             println!("seq gap: prev {prev} got {} (lost {lost})", pose.seq);
+            stats.inner.gap_events.fetch_add(1, Ordering::Relaxed);
+            stats.inner.gap_lost.fetch_add(lost as u64, Ordering::Relaxed);
         }
     }
     *last_seq = Some(pose.seq);
+    // 1 Hz Step 2 line (stderr): pose/video throughput since last print.
+    let now = Instant::now();
+    let due = match *last_log {
+        Some(t) => now.duration_since(t) >= Duration::from_secs(1),
+        None => true,
+    };
+    if due {
+        *last_log = Some(now);
+        let load = |a: &AtomicU64| a.swap(0, Ordering::Relaxed);
+        let c = &stats.inner;
+        let poses = load(&c.poses);
+        let gaps = load(&c.gap_events);
+        let lost_sum = load(&c.gap_lost);
+        let readbacks = load(&c.readbacks);
+        let offered = load(&c.offered);
+        let dropped_full = load(&c.dropped_full);
+        let frames = load(&c.frames_sent);
+        let dirty_sum = load(&c.dirty_sum);
+        let dirty_max = load(&c.dirty_max);
+        let vid_b = load(&c.video_bytes);
+        let wr_sum = load(&c.write_us_sum);
+        let wr_max = load(&c.write_us_max);
+        let dirty_avg = if frames > 0 { dirty_sum / frames } else { 0 };
+        let wr_avg = if frames > 0 { wr_sum / frames } else { 0 };
+        eprintln!(
+            "link poseFps={poses} gaps={gaps} lost={lost_sum} readbackFps={readbacks} offered={offered} droppedFull={dropped_full} frames={frames} dirtyAvg={dirty_avg} dirtyMax={dirty_max} vidKB={} wrAvgUs={wr_avg} wrMaxUs={wr_max}",
+            vid_b / 1024,
+        );
+    }
 
     // Predict forward by PREDICT_TAU_S in the body frame (right-multiply).
     let ang = pose.gyro.length() * PREDICT_TAU_S;
@@ -414,21 +506,57 @@ fn setup_scene(
     // thread, the clone to the paced video sender thread below.
     let port = open_puck_port();
     let writer = port.try_clone().unwrap_or_else(|e| panic!("clone serial port: {e:?}"));
+    let stats = LinkStats::default();
+    commands.insert_resource(stats.clone());
+    let reader_stats = stats.clone();
+    let sender_stats = stats.clone();
     // Pose reader thread: blocking read, frame-parse, parse_pose, oldest-drop
     // send so a stalled UI never blocks the reader and never grows memory
     // (crossbeam receivers share one queue, so a cloned handle discards).
     let (pose_tx, pose_rx) = crossbeam_channel::bounded::<Pose>(512);
     let discard_rx = pose_rx.clone();
     thread::spawn(move || {
+        let stats = reader_stats;
         let mut port = port;
         let mut scratch = [0u8; 1024];
         let mut parser = FrameParser::default();
         let mut payload = vec![0u8; FRAME_MAX_PAYLOAD];
         loop {
             let n = match port.read(&mut scratch) {
+                Ok(0) => continue,
                 Ok(n) => n,
                 Err(_) => continue,
             };
+            // Device 1 Hz status/log lines share the wire unframed; surface
+            // full lines on stderr so `q ...` lines stay correlatable. The
+            // 1 Hz report is ~200 B, so carry a small spill across reads
+            // (a 1 KB scratch can split it). Thread-local: reader only.
+            {
+                thread_local! {
+                    static SPILL: std::cell::RefCell<Vec<u8>> = std::cell::RefCell::new(Vec::new());
+                }
+                SPILL.with(|spill| {
+                    let mut spill = spill.borrow_mut();
+                    spill.extend_from_slice(&scratch[..n]);
+                    let mut line_start = 0;
+                    for i in 0..spill.len() {
+                        if spill[i] == b'\n' {
+                            if let Ok(s) = std::str::from_utf8(&spill[line_start..i]) {
+                                let t = s.trim_end_matches('\r');
+                                if t.starts_with("q ") {
+                                    eprintln!("dev {t}");
+                                }
+                            }
+                            line_start = i + 1;
+                        }
+                    }
+                    spill.drain(..line_start);
+                    if spill.len() > 256 {
+                        let drop = spill.len() - 256;
+                        spill.drain(..drop);
+                    }
+                });
+            }
             for &b in &scratch[..n] {
                 let Some((ty, len)) = parser.push(b, &mut payload) else {
                     continue;
@@ -437,7 +565,9 @@ fn setup_scene(
                     continue;
                 }
                 let pose = parse_pose(&payload[..len]);
+                stats.inner.poses.fetch_add(1, Ordering::Relaxed);
                 if let Err(crossbeam_channel::TrySendError::Full(pose)) = pose_tx.try_send(pose) {
+                    stats.inner.reader_drops.fetch_add(1, Ordering::Relaxed);
                     let _ = discard_rx.try_recv();
                     let _ = pose_tx.try_send(pose);
                 }
@@ -453,18 +583,28 @@ fn setup_scene(
     let (free_tx, free_rx) = crossbeam_channel::unbounded::<Box<[u8]>>();
     let return_tx = free_tx.clone();
     thread::spawn(move || {
+        let stats = sender_stats;
         let mut writer = writer;
         let mut prev = vec![0u8; VIDEO_FRAME_BYTES];
         while let Ok(frm) = frame_rx.recv() {
+            stats.inner.frames_sent.fetch_add(1, Ordering::Relaxed);
             let mut dirty = dirty_chunks(&prev, &frm.bytes);
             prev.copy_from_slice(&frm.bytes);
             if dirty.is_empty() {
                 dirty.push(0); // heartbeat: keeps device idle timer fresh
             }
-            for chunk in dirty {
+            let t0 = Instant::now();
+            let mut bytes: u64 = 0;
+            for chunk in &dirty {
                 let out = &frm.bytes[chunk * VIDEO_PAYLOAD_MAX..(chunk + 1) * VIDEO_PAYLOAD_MAX];
-                send_chunk(&mut writer, frm.id, chunk, out);
+                bytes += send_chunk(&mut writer, frm.id, *chunk, out) as u64;
             }
+            let us = t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+            stats.inner.dirty_sum.fetch_add(dirty.len() as u64, Ordering::Relaxed);
+            stats.inner.video_bytes.fetch_add(bytes, Ordering::Relaxed);
+            stats.inner.write_us_sum.fetch_add(us, Ordering::Relaxed);
+            stats.inner.write_us_max.fetch_max(us, Ordering::Relaxed);
+            stats.inner.dirty_max.fetch_max(dirty.len() as u64, Ordering::Relaxed);
             let _ = return_tx.send(frm.bytes);
         }
     });
@@ -484,7 +624,8 @@ fn setup_scene(
 // pooled buffer and hand it to the paced sender thread. Drop-if-behind: when
 // the 2-deep queue is full the frame is returned to the pool instead of
 // blocking the render thread.
-fn on_video_readback(readback: On<ReadbackComplete>, mut video: ResMut<VideoTx>) {
+fn on_video_readback(readback: On<ReadbackComplete>, mut video: ResMut<VideoTx>, stats: Res<LinkStats>) {
+    stats.inner.readbacks.fetch_add(1, Ordering::Relaxed);
     let data = &readback.data;
     // Tight-pack invariant: 320*4 = 1280 is a multiple of the 256-byte row
     // alignment, so the readback is exactly 307200 bytes with no stride
@@ -508,13 +649,16 @@ fn on_video_readback(readback: On<ReadbackComplete>, mut video: ResMut<VideoTx>)
     }
     let frame = video.frame_id;
     video.frame_id = frame.wrapping_add(1);
+    stats.inner.offered.fetch_add(1, Ordering::Relaxed);
     match video.frame_tx.try_send(Frame { bytes: buf, id: frame }) {
         Ok(()) => {}
         Err(std::sync::mpsc::TrySendError::Full(frm)) => {
             // Sender behind: return the frame buffer to the pool instead of blocking.
+            stats.inner.dropped_full.fetch_add(1, Ordering::Relaxed);
             let _ = video.free_tx.send(frm.bytes);
         }
         Err(std::sync::mpsc::TrySendError::Disconnected(frm)) => {
+            stats.inner.dropped_full.fetch_add(1, Ordering::Relaxed);
             let _ = video.free_tx.send(frm.bytes);
         }
     }

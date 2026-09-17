@@ -25,6 +25,7 @@ int UsbLink::pollVideoChunk(uint8_t *out, VideoChunkHdr &hdr) {
     }
     rxBuf[rxN++] = (uint8_t)c;
   }
+  rxBytes_ += (uint32_t)rxN;
   if (rxN == 0) {
     return 0;
   }
@@ -40,13 +41,14 @@ int UsbLink::pollVideoChunk(uint8_t *out, VideoChunkHdr &hdr) {
     }
     if (!parse_video_header(payload, len, hdr) || hdr.len == 0 ||
         (size_t)hdr.len + VIDEO_HDR_LEN > len) {
+      decodeDrops_++;
       continue;
     }
     if (type == FRAME_VIDEO) {
       // Raw path: hdr.len must be the full chunk (Display::chunkInner blits
       // a fixed 2-row window; hdr.len == VIDEO_PAYLOAD_MAX per the link.h
-      // alignment contract).
       if (hdr.len != VIDEO_PAYLOAD_MAX || (size_t)hdr.len + VIDEO_HDR_LEN != len) {
+        decodeDrops_++;
         continue;
       }
       memcpy(out, payload + VIDEO_HDR_LEN, hdr.len);
@@ -54,20 +56,22 @@ int UsbLink::pollVideoChunk(uint8_t *out, VideoChunkHdr &hdr) {
       // RLE path: decode into the caller's aligned buffer (out is 16-bit
       // aligned per the link.h contract); decode failure drops the chunk.
       if (!rle_decode_565(payload + VIDEO_HDR_LEN, hdr.len, (uint16_t *)out)) {
+        decodeDrops_++;
         continue;
       }
       hdr.len = VIDEO_PAYLOAD_MAX;
     }
+    chunks_++;
     return (int)hdr.len;
   }
   return 0;
 }
 
-void UsbLink::sendQuat(const float quat[4], const float gyro[3]) {
+bool UsbLink::sendQuat(const float quat[4], const float gyro[3]) {
   const bool doSend = sendNow_;
   sendNow_ = !sendNow_;
   if (!doSend) {
-    return;
+    return true;
   }
   uint8_t payload[QUAT_PACKET_LEN_V2];
   build_quat_packet(payload, pktSeq_, micros(), quat, gyro);
@@ -77,8 +81,10 @@ void UsbLink::sendQuat(const float quat[4], const float gyro[3]) {
   // is arriving while the reader stalls), skip this tick rather than stall
   // the 500 Hz fusion loop inside TinyUSB's blocking TX path.
   if (Serial.availableForWrite() < (int)n) {
-    return;
+    dropped_++;
+    return false;
   }
   Serial.write(frame, n);
   pktSeq_++;
+  return true;
 }
