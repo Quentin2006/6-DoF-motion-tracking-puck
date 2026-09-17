@@ -42,7 +42,7 @@ void setup() {
   while (Serial.available() > 0) {
     Serial.read();
   }
-  tracker.seedEKF();
+  tracker.start();
   if (!net.beginVideo(VIDEO_UDP_PORT)) {
     Serial.println("video bind failed; tracking-only");
   }
@@ -53,16 +53,8 @@ void setup() {
 }
 
 void loop() {
-  const float dt = 1.0f / (float)FUSION_RATE_HZ;
-  switch (tracker.step(dt)) {
-    case Tracker::Step::Processed:
-      net.sendQuat(tracker.quat(), tracker.gyro(), micros());
-      break;
-    case Tracker::Step::Failed:
-      Serial.println("MPU read failed");
-      break;
-    case Tracker::Step::Skip:
-      break;
+  if (tracker.step()) {
+    net.sendQuat(tracker.quat(), tracker.gyro(), micros());
   }
   // Video: one datagram per loop max (never a drain — starves 500 Hz fusion).
   // Chunks overwrite in place; loss tears, next frame_id keeps overwriting.
@@ -80,38 +72,8 @@ void loop() {
       }
     }
   }
-  unsigned long nowMs = millis();
-  if ((unsigned long)(nowMs - lastStatusMs) >= 1000UL) {
-    lastStatusMs = nowMs;
-    float bx, by, bz;
-    tracker.bias(bx, by, bz);
-    const float *q = tracker.quat();
-    Serial.print("q ");
-    Serial.print(q[0], 4);
-    Serial.print(' ');
-    Serial.print(q[1], 4);
-    Serial.print(' ');
-    Serial.print(q[2], 4);
-    Serial.print(' ');
-    Serial.print(q[3], 4);
-    Serial.print(" seq ");
-    Serial.print(net.sequence());
-    Serial.print(" tick ");
-    Serial.print(tracker.ticks());
-    Serial.print(" over ");
-    Serial.print(tracker.overruns());
-    Serial.print(" gate ");
-    Serial.print(tracker.gated());
-    Serial.print(" bg ");
-    Serial.print(bx, 6);
-    Serial.print(' ');
-    Serial.print(by, 6);
-    Serial.print(' ');
-    Serial.print(bz, 6);
-    Serial.print(" st ");
-    Serial.println(tracker.stillLatch() ? 1 : 0);
-    tracker.resetGated();
-  }
+  tracker.report(net.sequence());
+  const unsigned long nowMs = millis();
   // RGB demo resumes only after 10 s of video silence so it never fights video.
   // videoSeen keeps the first 10 s demo intact (videoActiveMs starts at 0).
   if ((unsigned long)(nowMs - lastColorMs) >= DISPLAY_COLOR_PERIOD_MS &&
