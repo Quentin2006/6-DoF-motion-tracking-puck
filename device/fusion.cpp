@@ -305,11 +305,3 @@ void Ekf6Dof::getBias(float &x, float &y, float &z) const {
   y = bg_[1];
   z = bg_[2];
 }
-
-void Ekf6Dof::clampBiasCovariance(float maxVar) {
-  for (int i = 3; i < 6; ++i) {
-    if (P_[i][i] > maxVar) {
-      P_[i][i] = maxVar;
-    }
-  }
-}
