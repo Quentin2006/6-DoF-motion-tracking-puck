@@ -91,8 +91,8 @@ static void runAccelCal(Mpu6050 &mpu) {
 }
 
 // Driver -> body remap from FUSION_AXIS_MAP (1/2/3 = +x/+y/+z; negative
-// negates). Index 0 aliases z so an out-of-range 0 keeps the historical
-// selAxis() fall-through instead of reading out of bounds.
+// negates). Index 0 aliases z: an out-of-range 0 keeps the historical
+// "anything else is z" fall-through instead of reading out of bounds.
 static void toBody(const vec3 &v, float out[3]) {
   const float s[4] = {v.z, v.x, v.y, v.z};
   for (int i = 0; i < 3; ++i) {
