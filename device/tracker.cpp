@@ -187,7 +187,9 @@ bool Tracker::step() {
   const bool okA = mpu_.readAccel(accel);
   const bool okG = mpu_.readGyro(gyro);
   if (!okA || !okG) {
+#ifdef DEBUG_LOG
     Serial.println("MPU read failed");
+#endif
     return false;
   }
   float bg[3], ba[3];
@@ -195,11 +197,10 @@ bool Tracker::step() {
   toBody(accel, ba);
   const float bnorm = sqrtf(ba[0] * ba[0] + ba[1] * ba[1] + ba[2] * ba[2]);
   // Still detector: driver-frame gyro (pre-remap) + body accel norm.
-  if (still_.update(gyro.x, gyro.y, gyro.z, bnorm)) {
-    mpu_.nudgeGyroBias(still_.meanDps(), still_.alpha());
-  }
   if (still_.justExited()) {
+#ifdef DEBUG_LOG
     Serial.println("still exit");
+#endif
   }
   const float dt = 1.0f / (float)FUSION_RATE_HZ;
   ekf_.predict(bg[0] * DPS_TO_RPS, bg[1] * DPS_TO_RPS, bg[2] * DPS_TO_RPS, dt);

@@ -175,9 +175,10 @@ fn build_frame(out: &mut [u8], ty: u8, payload: &[u8]) -> usize {
     5 + payload.len() + 2
 }
 
-// Encode one dirty chunk and burst it as a FRAME_VIDEO / FRAME_VIDEO_RLE
-// frame. Raw fallback when incompressible (the RLE worst case exceeds the
-fn send_chunk(writer: &mut Box<dyn serialport::SerialPort>, id: u16, chunk: usize, bytes: &[u8]) -> usize {
+// Encode one dirty chunk into `frame_buf`, returning the frame bytes used (0
+// on encode failure, never). Raw fallback when incompressible (the RLE worst
+// case exceeds the raw size, so the comparison is strict).
+fn encode_chunk(frame_buf: &mut [u8], id: u16, chunk: usize, bytes: &[u8]) -> usize {
     let enc = rle_encode_565(bytes);
     let (ty, body): (u8, &[u8]) = if enc.len() < VIDEO_PAYLOAD_MAX {
         (FRAME_VIDEO_RLE, &enc)
@@ -190,13 +191,7 @@ fn send_chunk(writer: &mut Box<dyn serialport::SerialPort>, id: u16, chunk: usiz
     payload[4..6].copy_from_slice(&(VIDEO_CHUNKS as u16).to_le_bytes());
     payload[6..8].copy_from_slice(&(body.len() as u16).to_le_bytes());
     payload[8..8 + body.len()].copy_from_slice(body);
-    let mut frame = [0u8; 7 + 8 + VIDEO_PAYLOAD_MAX];
-    let n = build_frame(&mut frame, ty, &payload[..8 + body.len()]);
-    if writer.write_all(&frame[..n]).is_ok() {
-        n
-    } else {
-        0
-    }
+    build_frame(frame_buf, ty, &payload[..8 + body.len()])
 }
 
 #[derive(Default)]
@@ -329,14 +324,16 @@ struct LinkCounters {
 }
 
 // Video sender queue to the puck panel over the same CDC port.
-// The sender thread owns a cloned serial handle and paces one chunk per
-// ~833 us at 10 fps; frame_tx is 2-deep so the render thread never blocks
+// The render thread offers at most 10 fps (100 ms gate); the sender thread
+// bursts dirty chunks with no pacing — the 1a86 UART baud is the limiter.
+// frame_tx is 2-deep so the render thread never blocks
 #[derive(Resource)]
 struct VideoTx {
     frame_tx: SyncSender<Frame>,
     free_tx: crossbeam_channel::Sender<Box<[u8]>>,
     free_rx: crossbeam_channel::Receiver<Box<[u8]>>,
     frame_id: u16,
+    last_accept: Option<Instant>,
 }
 
 pub struct TrackPlugin;
@@ -587,6 +584,8 @@ fn setup_scene(
         let stats = sender_stats;
         let mut writer = writer;
         let mut prev = vec![0u8; VIDEO_FRAME_BYTES];
+        // Reused burst buffer: 120 worst-case raw frames; grows never shrinks.
+        let mut burst = Vec::<u8>::new();
         while let Ok(frm) = frame_rx.recv() {
             stats.inner.frames_sent.fetch_add(1, Ordering::Relaxed);
             let mut dirty = dirty_chunks(&prev, &frm.bytes);
@@ -595,14 +594,18 @@ fn setup_scene(
                 dirty.push(0); // heartbeat: keeps device idle timer fresh
             }
             let t0 = Instant::now();
-            let mut bytes: u64 = 0;
+            burst.clear();
+            let mut scratch = [0u8; 7 + 8 + VIDEO_PAYLOAD_MAX];
             for chunk in &dirty {
                 let out = &frm.bytes[chunk * VIDEO_PAYLOAD_MAX..(chunk + 1) * VIDEO_PAYLOAD_MAX];
-                bytes += send_chunk(&mut writer, frm.id, *chunk, out) as u64;
+                let n = encode_chunk(&mut scratch, frm.id, *chunk, out);
+                burst.extend_from_slice(&scratch[..n]);
             }
+            let bytes = burst.len() as u64;
+            let ok = writer.write_all(&burst).is_ok();
             let us = t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
             stats.inner.dirty_sum.fetch_add(dirty.len() as u64, Ordering::Relaxed);
-            stats.inner.video_bytes.fetch_add(bytes, Ordering::Relaxed);
+            stats.inner.video_bytes.fetch_add(if ok { bytes } else { 0 }, Ordering::Relaxed);
             stats.inner.write_us_sum.fetch_add(us, Ordering::Relaxed);
             stats.inner.write_us_max.fetch_max(us, Ordering::Relaxed);
             stats.inner.dirty_max.fetch_max(dirty.len() as u64, Ordering::Relaxed);
@@ -615,6 +618,7 @@ fn setup_scene(
         free_tx,
         free_rx,
         frame_id: 0,
+        last_accept: None,
     });
     // One persistent readback: the component fires every frame on its own
     // until removed, so spawn once and never despawn — zero entity churn.
@@ -623,10 +627,19 @@ fn setup_scene(
 
 // Readback fires when the requested texture copy completes; pack RGB565 into a
 // pooled buffer and hand it to the paced sender thread. Drop-if-behind: when
-// the 2-deep queue is full the frame is returned to the pool instead of
-// blocking the render thread.
 fn on_video_readback(readback: On<ReadbackComplete>, mut video: ResMut<VideoTx>, stats: Res<LinkStats>) {
     stats.inner.readbacks.fetch_add(1, Ordering::Relaxed);
+    // Step 4 gate: at most 10 fps (100 ms since last accepted frame). Excess
+    // frames drop before the RGB565 pack — same pool return as the Full arm.
+    // The sender-thread chunk-0 heartbeat is untouched.
+    let now = Instant::now();
+    if let Some(t) = video.last_accept {
+        if now.duration_since(t) < Duration::from_millis(100) {
+            stats.inner.dropped_full.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    }
+    video.last_accept = Some(now);
     let data = &readback.data;
     // Tight-pack invariant: 320*4 = 1280 is a multiple of the 256-byte row
     // alignment, so the readback is exactly 307200 bytes with no stride

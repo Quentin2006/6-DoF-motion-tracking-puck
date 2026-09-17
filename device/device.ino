@@ -55,13 +55,14 @@ void loop() {
   }
 
   // Video: budgeted multi-chunk drain (never drain-all — it starves 500 Hz
-  // fusion). Max 16 chunks under a 1200 us budget inside one SPI
-  // transaction; fusion + ~0.35 ms I2C must still fit the 2000 us tick.
+  // fusion). Step 5: max 8 chunks under the same 1200 us budget — at
+  // 62.5 MHz SPI one 1280 B chunk is ~164 us + setAddrWindow, so 16 was
+  // ~2.6 ms > the 2000 us tick while 8 fits with fusion + ~0.35 ms I2C.
   // vidBuf must be 4-byte aligned: Display::chunkInner -> writePixels SPI
   // DMA reads 16-bit words, and a misaligned stack byte buffer corrupts on
   // word boundaries (periodic per-pixel pattern).
   alignas(4) static uint16_t vidBuf[VIDEO_PAYLOAD_MAX / 2];
-  constexpr int kMaxChunks = 16;
+  constexpr int kMaxChunks = 8;
   constexpr unsigned long kBudgetUs = 1200;
   const unsigned long tVid0 = micros();
   int n = 0;

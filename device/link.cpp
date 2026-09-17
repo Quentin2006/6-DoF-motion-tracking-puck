@@ -15,16 +15,13 @@ int UsbLink::pollVideoChunk(uint8_t *out, VideoChunkHdr &hdr) {
   // partial-frame state across calls, so a back-to-back video burst spreads
   // over many loop calls instead of stalling one 500 Hz fusion tick — the
   // panel blit absorbs the delay, the pose stream never does. Bytes beyond
-  // the segment wait in the queue for the next calls.
+  // the segment wait in the queue for the next calls. Single block read
+  // (not per-byte Serial.read) so the ~10 KB/s video burst costs one
+  // FreeRTOS copy per loop, not ~1300 virtual calls.
   uint8_t rxBuf[FRAME_MAX_PAYLOAD + 16];
-  size_t rxN = 0;
-  while (rxN < sizeof rxBuf && Serial.available() > 0) {
-    int c = Serial.read();
-    if (c < 0) {
-      break;
-    }
-    rxBuf[rxN++] = (uint8_t)c;
-  }
+  const size_t want = sizeof rxBuf;
+  const int avail = Serial.available();
+  const size_t rxN = (avail <= 0) ? 0 : Serial.readBytes((char *)rxBuf, (size_t)(avail < (int)want ? avail : (int)want));
   rxBytes_ += (uint32_t)rxN;
   if (rxN == 0) {
     return 0;
