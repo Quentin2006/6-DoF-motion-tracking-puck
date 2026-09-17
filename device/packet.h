@@ -3,12 +3,11 @@
 #include <cstdint>
 #include <cstring>
 
-// Wire layout (v2, 36 bytes), little-endian. Consumed by
+// Wire layout (36 bytes), little-endian. Consumed by
 // engine/src/tracking.rs and asserted against tests/packet_fixture.txt.
 //   seq u32 | stamp u32 | quat x,y,z,w f32 | gyro x,y,z f32
 // Quat order is x,y,z,w to match Quat::from_xyzw on the engine side.
-constexpr size_t QUAT_PACKET_LEN_V1 = 24; // seq + stamp + quat xyzw (legacy)
-constexpr size_t QUAT_PACKET_LEN_V2 = 36; // + gyro xyz
+constexpr size_t QUAT_PACKET_LEN_V2 = 36; // seq + stamp + quat xyzw + gyro xyz
 
 // Build a v2 packet into `pkt` (must be >= QUAT_PACKET_LEN_V2 bytes).
 // Deliberately host-compilable (no Arduino/WiFi): the raw byte contract in one

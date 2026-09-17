@@ -61,11 +61,11 @@ void Net::sendQuat(const float quat[4], const float gyro[3], uint32_t stamp) {
   bool doSend = sendNow_;
   sendNow_ = !sendNow_;
 
-  uint8_t pkt[QUAT_PACKET_SIZE_V2];
+  uint8_t pkt[QUAT_PACKET_LEN_V2];
   build_quat_packet(pkt, pktSeq_, stamp, quat, gyro);
   if (doSend) {
     udp_.beginPacket(ip_, port_);
-    udp_.write(pkt, QUAT_PACKET_SIZE_V2);
+    udp_.write(pkt, QUAT_PACKET_LEN_V2);
     udp_.endPacket();
     pktSeq_++;
   }
