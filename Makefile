@@ -1,9 +1,9 @@
-.PHONY: all compile upload monitor engine device test
+.PHONY: all clean lsp compile upload monitor engine device test
 FQBN ?= esp32:esp32:esp32s3
 
 all: compile upload engine
 clean:
-	arduino-cli compile --clean device
+	arduino-cli compile --clean --fqbn $(FQBN) device
 compile:
 	arduino-cli compile --fqbn $(FQBN) device
 upload:
