@@ -20,6 +20,7 @@ constexpr float GYRO_LSB_TO_DPS = 1.0f / 16.4f;         // ±2000 dps
 constexpr float GRAVITY_MPS2 = 9.80665f;
 constexpr uint16_t UDP_PORT = 3333;      // must match engine/src/tracking.rs UDP_PORT
 constexpr int FUSION_RATE_HZ = 500;
+constexpr unsigned long STATUS_PERIOD_MS = 1000; // 1 Hz Serial status line (Tracker::report)
 constexpr float DPS_TO_RPS = 3.14159265f / 180.0f; // deg/s to rad/s
 constexpr float EKF_SIGMA_GYRO = 0.002f;   // rad/s/sqrt(Hz): ±2000dps FSR stationary floor ±0.15 dps; quant 0.061 dps/LSB adds 0.018 dps rms (RSS 0.151) — negligible vs electronic noise, value holds
 constexpr float EKF_SIGMA_BG = 5.0e-06f;   // rad/s^2/sqrt(Hz): bias random walk, one decade below gyro over 100 s drift

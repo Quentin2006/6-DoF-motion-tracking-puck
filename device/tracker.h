@@ -1,41 +1,26 @@
 #pragma once
-#include "cal.h"
-#include "config.h"
 #include "mpu6050.h"
 #include "fusion.h"
 #include "still_detect.h"
 
 class Tracker {
 public:
-  enum class Step { Skip, Processed, Failed };
+  bool begin();                                  // mpu_.begin(); false -> caller halts
+  void calibrate();                              // blocking gyro + accel bias seeding
+  void printAccelCal();                          // NVS-loaded 6-point accel cal (persistence proof)
+  void maybeRunAccelCal(unsigned long timeoutMs); // "CAL6" within the window -> blocking 6-pose cal
+  void start();                                  // seed EKF from current gyro; anchor scheduler + status cadence
+  bool step();                                   // one 500 Hz tick; true = fresh quat()/gyro() to send
+  void report(uint32_t seq);                     // 1 Hz Serial status line (self-gated)
 
-  bool begin();                      // mpu_.begin(); false -> caller prints "MPU6050 init failed"
-  void calibrate();                  // mpu_.getAccelBias(GYRO_CALIB_SAMPLES) + getGyroBias(...)
-  void printAccelCal();              // getAccelCal() then print off/scale (persistence proof)
-  void seedEKF();                    // mpu_.readGyro -> ekf_.begin(gbRps)
-  // Setup-time only: if "CAL6" arrives within timeoutMs, run blocking 6-pose cal on mpu_; true = trigger seen.
-  bool maybeRunAccelCal(unsigned long timeoutMs);
-
-  // One 500 Hz tick. Skip = scheduler chose not to run (overrun or too soon).
-  // Processed = full pipeline ran, quat()/gyro()/outputs valid -> caller sends.
-  // Failed = IMU read failed -> caller logs.
-  Step step(float dt);
-
-  const float *quat() const { return quat_; }   // display-frame x,y,z,w (valid after Processed)
-  const float *gyro() const { return gyro_; }   // body-frame gyro rad/s (valid after Processed)
-  void bias(float &x, float &y, float &z) const;
-  bool stillLatch() const { return still_.latched(); }
-  uint32_t ticks() const { return ticks_; }
-  uint32_t overruns() const { return overruns_; }
-  uint32_t gated() const { return gated_; }
-  void resetGated() { gated_ = 0; }
+  const float *quat() const { return quat_; } // display-frame x,y,z,w
+  const float *gyro() const { return gyro_; } // body-frame rad/s
 private:
   Mpu6050 mpu_;
   Ekf6Dof ekf_;
   StillDetector still_;
-  AccelCalibrator cal_;
-  float quat_[4] = {0, 0, 0, 1};     // x,y,z,w display frame
-  float gyro_[3] = {0, 0, 0};        // body-frame rad/s
+  float quat_[4] = {0, 0, 0, 1};
+  float gyro_[3] = {0, 0, 0};
   uint32_t ticks_ = 0, overruns_ = 0, gated_ = 0;
-  unsigned long lastTickUs_ = 0;
+  unsigned long lastTickUs_ = 0, lastReportMs_ = 0;
 };
