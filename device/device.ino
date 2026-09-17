@@ -41,14 +41,34 @@ void loop() {
   if (tracker.step()) {
     usbLink.sendQuat(tracker.quat(), tracker.gyro());
   }
-  // Video: one chunk per loop max (never a drain — it starves 500 Hz fusion).
-  // vidBuf must be 4-byte aligned: Display::chunk -> writePixels SPI DMA
-  // reads 16-bit words, and a misaligned stack byte buffer corrupts on word
-  // boundaries (periodic per-pixel pattern).
+  // Video: budgeted multi-chunk drain (never drain-all — it starves 500 Hz
+  // fusion). Max 16 chunks under a 1200 us budget inside one SPI
+  // transaction; fusion + ~0.35 ms I2C must still fit the 2000 us tick.
+  // vidBuf must be 4-byte aligned: Display::chunkInner -> writePixels SPI
+  // DMA reads 16-bit words, and a misaligned stack byte buffer corrupts on
+  // word boundaries (periodic per-pixel pattern).
   alignas(4) static uint16_t vidBuf[VIDEO_PAYLOAD_MAX / 2];
-  VideoChunkHdr hdr = {};
-  const int n = usbLink.pollVideoChunk((uint8_t *)vidBuf, hdr);
-  display.chunk(hdr, vidBuf, n); // n <= 0: no-op
+  constexpr int kMaxChunks = 16;
+  constexpr unsigned long kBudgetUs = 1200;
+  const unsigned long t0 = micros();
+  int n = 0;
+  bool open = false;
+  while (n < kMaxChunks && (unsigned long)(micros() - t0) < kBudgetUs) {
+    VideoChunkHdr hdr = {};
+    const int got = usbLink.pollVideoChunk((uint8_t *)vidBuf, hdr);
+    if (got <= 0) {
+      break;
+    }
+    if (!open) {
+      display.beginBurst();
+      open = true;
+    }
+    display.chunkInner(hdr, vidBuf, got);
+    n++;
+  }
+  if (open) {
+    display.endBurst();
+  }
   tracker.report(usbLink.sequence());
   display.tick(millis());
 }

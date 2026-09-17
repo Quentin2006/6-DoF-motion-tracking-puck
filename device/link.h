@@ -6,8 +6,8 @@
 
 class UsbLink {
 public:
-  // Grow the CDC RX buffer (default 256 B) before Serial.begin so paced video
-  // bursts fit. The 1a86:55d3 panel bridge is a real UART: baud is wire
+  // Grow the CDC RX buffer (default 256 B) before Serial.begin so burst
+  // video frames fit. The 1a86:55d3 panel bridge is a real UART: baud is wire
   // speed, 921600 keeps a compressed 10 fps stream under budget.
   // Always returns true (nothing to fail).
   bool begin(unsigned long baud = 921600, size_t rxBuf = 4096);

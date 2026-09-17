@@ -39,7 +39,7 @@ constexpr int TFT_RST = 8;
 constexpr int TFT_BL = 7;
 constexpr int TFT_W = 240;
 constexpr int TFT_H = 320;
-constexpr uint32_t TFT_SPI_FREQ = 40000000; // conservative 40 MHz; raise only if frames tear
+constexpr uint32_t TFT_SPI_FREQ = 62500000; // 62.5 MHz: ST7789VW §7.4.3 Table 6 TSCYCW min 16 ns write cycle; fallback 40 MHz on any tear
 constexpr unsigned long DISPLAY_COLOR_PERIOD_MS = 5000; // solid RGB cycle step
 
 // ------------------------------- STATUS LED -------------------------------

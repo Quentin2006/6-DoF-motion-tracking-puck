@@ -15,16 +15,27 @@ void Display::begin() {
   lastColorMs_ = millis();
 }
 
+void Display::beginBurst() { tft_.startWrite(); }
+
+void Display::endBurst() { tft_.endWrite(); }
+
+void Display::chunkInner(const VideoChunkHdr &hdr, const uint16_t *px, int len) {
+  if (len != (int)VIDEO_PAYLOAD_MAX || hdr.idx >= VIDEO_CHUNKS) {
+    return;
+  }
+  tft_.setAddrWindow(0, (uint16_t)(hdr.idx * VIDEO_CHUNK_ROWS), VIDEO_W, VIDEO_CHUNK_ROWS);
+  // Adafruit's 2nd argument is a PIXEL count (len * 2 bytes on the wire).
+  tft_.writePixels(const_cast<uint16_t *>(px), VIDEO_W * VIDEO_CHUNK_ROWS, true, false);
+  lastChunkMs_ = millis();
+}
+
 void Display::chunk(const VideoChunkHdr &hdr, const uint16_t *px, int len) {
   if (len != (int)VIDEO_PAYLOAD_MAX || hdr.idx >= VIDEO_CHUNKS) {
     return;
   }
-  tft_.startWrite();
-  tft_.setAddrWindow(0, (uint16_t)(hdr.idx * VIDEO_CHUNK_ROWS), VIDEO_W, VIDEO_CHUNK_ROWS);
-  // Adafruit's 2nd argument is a PIXEL count (len * 2 bytes on the wire).
-  tft_.writePixels(const_cast<uint16_t *>(px), VIDEO_W * VIDEO_CHUNK_ROWS, true, false);
-  tft_.endWrite();
-  lastChunkMs_ = millis();
+  beginBurst();
+  chunkInner(hdr, px, len);
+  endBurst();
 }
 
 void Display::tick(unsigned long now) {

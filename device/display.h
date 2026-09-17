@@ -11,6 +11,12 @@ public:
   void begin();
   // Draw one engine video chunk. len <= 0 (no datagram) is a no-op.
   void chunk(const VideoChunkHdr &hdr, const uint16_t *px, int len);
+  // Burst drain pieces: beginBurst opens one SPI transaction, chunkInner
+  // blits a single chunk inside it, endBurst closes it. The caller skips
+  // the transaction entirely when no chunk arrived.
+  void beginBurst();
+  void chunkInner(const VideoChunkHdr &hdr, const uint16_t *px, int len);
+  void endBurst();
   // Solid RGB cycle while no video has arrived recently, so it never fights
   // the video stream.
   void tick(unsigned long now);

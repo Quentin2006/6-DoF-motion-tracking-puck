@@ -1,7 +1,7 @@
 use std::io::{Read as _, Write as _};
 use std::sync::mpsc::{SyncSender, sync_channel};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bevy::camera::RenderTarget;
 use bevy::prelude::*;
@@ -79,6 +79,16 @@ fn rle_encode_565(chunk: &[u8]) -> Vec<u8> {
     }
     out
 }
+// Dirty 2-row chunk indices where cur differs from prev (1280 B slices).
+fn dirty_chunks(prev: &[u8], cur: &[u8]) -> Vec<usize> {
+    debug_assert_eq!(prev.len(), VIDEO_FRAME_BYTES);
+    debug_assert_eq!(cur.len(), VIDEO_FRAME_BYTES);
+    prev.chunks_exact(VIDEO_PAYLOAD_MAX)
+        .zip(cur.chunks_exact(VIDEO_PAYLOAD_MAX))
+        .enumerate()
+        .filter_map(|(i, (p, c))| if p != c { Some(i) } else { None })
+        .collect()
+}
 // Transport+render delay extrapolated from packet gyro, and display smoothing.
 const PREDICT_TAU_S: f32 = 0.008;
 const SMOOTH_TAU_S: f32 = 0.006;
@@ -95,7 +105,6 @@ const VIDEO_PAYLOAD_MAX: usize = 1280; // 2 rows x 320 px x 2 B
 const VIDEO_CHUNK_ROWS: usize = VIDEO_PAYLOAD_MAX / (VIDEO_W * 2); // 2
 const VIDEO_CHUNKS: usize = VIDEO_H / VIDEO_CHUNK_ROWS; // 120
 const VIDEO_FRAME_BYTES: usize = VIDEO_W * VIDEO_H * 2; // 153600 RGB565
-const VIDEO_FRAME_PERIOD: Duration = Duration::from_millis(100); // 10 fps compressed
 
 struct Frame {
     bytes: Box<[u8]>,
@@ -426,23 +435,24 @@ fn setup_scene(
         }
     });
     commands.insert_resource(SerialLink { pose_rx });
-    // Paced sender thread: owns the cloned serial handle, one chunk every
-    // ~833 us at 10 fps against absolute per-chunk deadlines (jitter never
-    // compounds). Serial fire-and-forget; write errors ignored. Returned
-    // buffers recycle through free_tx so the steady state allocates nothing.
+    // Burst sender thread: owns the cloned serial handle, sends only dirty
+    // 2-row chunks with no pacing (native USB bulk needs none).
+    // Fire-and-forget; write errors ignored. Returned buffers recycle
+    // through free_tx so the steady state allocates nothing.
     let (frame_tx, frame_rx) = sync_channel::<Frame>(2);
     let (free_tx, free_rx) = crossbeam_channel::unbounded::<Box<[u8]>>();
     let return_tx = free_tx.clone();
     thread::spawn(move || {
         let mut writer = writer;
+        let mut prev = vec![0u8; VIDEO_FRAME_BYTES];
         while let Ok(frm) = frame_rx.recv() {
-            let t0 = Instant::now();
-            for (chunk, out) in frm.bytes.chunks_exact(VIDEO_PAYLOAD_MAX).enumerate() {
-                let deadline = t0 + VIDEO_FRAME_PERIOD / VIDEO_CHUNKS as u32 * (chunk as u32 + 1);
-                let now = Instant::now();
-                if deadline > now {
-                    thread::sleep(deadline - now);
-                }
+            let mut dirty = dirty_chunks(&prev, &frm.bytes);
+            prev.copy_from_slice(&frm.bytes);
+            if dirty.is_empty() {
+                dirty.push(0); // heartbeat: keeps device idle timer fresh
+            }
+            for chunk in dirty {
+                let out = &frm.bytes[chunk * VIDEO_PAYLOAD_MAX..(chunk + 1) * VIDEO_PAYLOAD_MAX];
                 // Compress per chunk; raw fallback when incompressible (the
                 // RLE worst case exceeds the raw size, so the comparison is
                 // strict — equal-or-larger stays raw and always legal).
@@ -685,5 +695,19 @@ mod tests {
         assert_eq!(word(319, 0), 0x3807);
         assert_eq!(word(0, 239), 0x077D);
         assert_eq!(word(319, 239), 0x3F65);
+    }
+    #[test]
+    fn dirty_chunks_detects_single_and_spanning_changes() {
+        let base = vec![0x11u8; VIDEO_FRAME_BYTES];
+        assert!(dirty_chunks(&base, &base).is_empty());
+        let mut one = base.clone();
+        one[7 * VIDEO_PAYLOAD_MAX + 100] ^= 0xFF;
+        assert_eq!(dirty_chunks(&base, &one), vec![7]);
+        let mut span = base.clone();
+        span[3 * VIDEO_PAYLOAD_MAX + VIDEO_PAYLOAD_MAX - 1] ^= 0x01;
+        span[4 * VIDEO_PAYLOAD_MAX] ^= 0x01;
+        assert_eq!(dirty_chunks(&base, &span), vec![3, 4]);
+        let all = vec![0x22u8; VIDEO_FRAME_BYTES];
+        assert_eq!(dirty_chunks(&base, &all), (0..VIDEO_CHUNKS).collect::<Vec<_>>());
     }
 }
