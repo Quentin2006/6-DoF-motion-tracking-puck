@@ -6,13 +6,13 @@
 class StillDetector {
 public:
   // Returns true if a bias nudge is warranted this tick (latched and still, or
-  // just entered still). On a nudge-return, caller should call residualDps() and
-  // nudgeGyroBias(residual, alpha()).
+  // just entered still). On a nudge-return, caller should call meanDps() and
+  // nudgeGyroBias(mean, alpha()).
   bool update(float gx, float gy, float gz, float norm);
   void reset();
   bool latched() const { return latched_; }
   bool justExited() const { return justExited_; }
-  vec3 residualDps() const;          // window mean, driver frame
+  vec3 meanDps() const;                 // window mean, driver frame
   float alpha() const { return kAlpha; }
 
 private:

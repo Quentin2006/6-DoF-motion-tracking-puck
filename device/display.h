@@ -9,11 +9,10 @@ public:
   Display();
   // Best-effort bring-up. Tracking streams even if the panel is unplugged.
   void begin();
-  // Draw one engine video chunk. len <= 0 (no datagram) is a no-op.
-  void chunk(const VideoChunkHdr &hdr, const uint16_t *px, int len);
-  // Burst drain pieces: beginBurst opens one SPI transaction, chunkInner
-  // blits a single chunk inside it, endBurst closes it. The caller skips
-  // the transaction entirely when no chunk arrived.
+  // Draw engine video chunks. len <= 0 (no datagram) is a no-op.
+  // beginBurst opens one SPI transaction, chunkInner blits a single chunk
+  // inside it, endBurst closes it. The loop() drain skips the transaction
+  // entirely when no chunk arrived.
   void beginBurst();
   void chunkInner(const VideoChunkHdr &hdr, const uint16_t *px, int len);
   void endBurst();

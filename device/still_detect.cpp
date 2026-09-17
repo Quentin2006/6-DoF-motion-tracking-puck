@@ -47,15 +47,11 @@ bool StillDetector::calm() const {
 }
 
 // Driver-frame gyro residual from the still window: direct window mean.
-// The window stores driver-frame gyro (push sites pass gyro.x/y/z
-// pre-remap) and nudgeGyroBias expects driver-frame bias, so no remap
-// round-trip is needed.
-vec3 StillDetector::residualDps() const {
+// The window stores driver-frame gyro and nudgeGyroBias expects driver-frame
+// bias, so no remap round-trip is needed.
+vec3 StillDetector::meanDps() const {
   const float inv = 1.0f / (float)kWinTicks;
-  vec3 out;
-  out.x = sum_[0] * inv;
-  out.y = sum_[1] * inv;
-  out.z = sum_[2] * inv;
+  const vec3 out{sum_[0] * inv, sum_[1] * inv, sum_[2] * inv};
   return out;
 }
 

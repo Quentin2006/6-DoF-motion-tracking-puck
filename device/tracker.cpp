@@ -50,7 +50,9 @@ static void runAccelCal(Mpu6050 &mpu) {
     while ((unsigned long)(millis() - t0) < 5000UL) {
       vec3 s;
       if (mpu.readRawAccel(s)) {
-        total += s;
+        total.x += s.x;
+        total.y += s.y;
+        total.z += s.z;
         ++n;
       }
       delay(5);
@@ -59,7 +61,10 @@ static void runAccelCal(Mpu6050 &mpu) {
       Serial.println("CAL6 aborted, nothing saved (no samples)");
       return;
     }
-    total /= (float)n;
+    const float inv = 1.0f / (float)n;
+    total.x *= inv;
+    total.y *= inv;
+    total.z *= inv;
     means[p] = total;
     Serial.printf("CAL6 mean %s %.4f %.4f %.4f\n", kPose[p], total.x, total.y, total.z);
   }
@@ -90,16 +95,13 @@ static void runAccelCal(Mpu6050 &mpu) {
   Serial.println("CAL6 saved; reboot");
 }
 
-// Driver -> body remap from FUSION_AXIS_MAP (1/2/3 = +x/+y/+z; negative
-// negates). Index 0 aliases z: an out-of-range 0 keeps the historical
-// "anything else is z" fall-through instead of reading out of bounds.
+// Driver -> body swizzle: body=(sz,sy,sx). Sensor +X (up, ~9.8 at rest) lands
+// on body +Z, matching the EKF gravity [0,0,1]; pitch/roll order verified in
+// live test.
 static void toBody(const vec3 &v, float out[3]) {
-  const float s[4] = {v.z, v.x, v.y, v.z};
-  for (int i = 0; i < 3; ++i) {
-    const int8_t m = FUSION_AXIS_MAP[i];
-    const int a = m < 0 ? -m : m;
-    out[i] = s[a] * (m < 0 ? -1.0f : 1.0f);
-  }
+  out[0] = v.z;
+  out[1] = v.y;
+  out[2] = v.x;
 }
 
 static void quatMul(float ax, float ay, float az, float aw,
@@ -183,7 +185,7 @@ bool Tracker::step() {
   const float bnorm = sqrtf(ba[0] * ba[0] + ba[1] * ba[1] + ba[2] * ba[2]);
   // Still detector: driver-frame gyro (pre-remap) + body accel norm.
   if (still_.update(gyro.x, gyro.y, gyro.z, bnorm)) {
-    mpu_.nudgeGyroBias(still_.residualDps(), still_.alpha());
+    mpu_.nudgeGyroBias(still_.meanDps(), still_.alpha());
   }
   if (still_.justExited()) {
     Serial.println("still exit");

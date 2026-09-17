@@ -29,15 +29,6 @@ void Display::chunkInner(const VideoChunkHdr &hdr, const uint16_t *px, int len) 
   lastChunkMs_ = millis();
 }
 
-void Display::chunk(const VideoChunkHdr &hdr, const uint16_t *px, int len) {
-  if (len != (int)VIDEO_PAYLOAD_MAX || hdr.idx >= VIDEO_CHUNKS) {
-    return;
-  }
-  beginBurst();
-  chunkInner(hdr, px, len);
-  endBurst();
-}
-
 void Display::tick(unsigned long now) {
   const bool videoIdle = lastChunkMs_ == 0 || (unsigned long)(now - lastChunkMs_) > 10000UL;
   if (!videoIdle || (unsigned long)(now - lastColorMs_) < DISPLAY_COLOR_PERIOD_MS) {

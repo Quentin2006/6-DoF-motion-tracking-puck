@@ -38,16 +38,15 @@ int UsbLink::pollVideoChunk(uint8_t *out, VideoChunkHdr &hdr) {
     if (type != FRAME_VIDEO && type != FRAME_VIDEO_RLE) {
       continue;
     }
-    bool ok = parse_video_header(payload, len, hdr);
-    ok = ok && hdr.len > 0 && (size_t)hdr.len + VIDEO_HDR_LEN <= len;
-    if (!ok) {
+    if (!parse_video_header(payload, len, hdr) || hdr.len == 0 ||
+        (size_t)hdr.len + VIDEO_HDR_LEN > len) {
       continue;
     }
     if (type == FRAME_VIDEO) {
-      // Raw path: hdr.len must be the full chunk (Display::chunk blits a
-      // fixed 2-row window; hdr.len == VIDEO_PAYLOAD_MAX per the link.h
+      // Raw path: hdr.len must be the full chunk (Display::chunkInner blits
+      // a fixed 2-row window; hdr.len == VIDEO_PAYLOAD_MAX per the link.h
       // alignment contract).
-      if (hdr.len != VIDEO_PAYLOAD_MAX) {
+      if (hdr.len != VIDEO_PAYLOAD_MAX || (size_t)hdr.len + VIDEO_HDR_LEN != len) {
         continue;
       }
       memcpy(out, payload + VIDEO_HDR_LEN, hdr.len);
@@ -58,13 +57,6 @@ int UsbLink::pollVideoChunk(uint8_t *out, VideoChunkHdr &hdr) {
         continue;
       }
       hdr.len = VIDEO_PAYLOAD_MAX;
-    }
-    // Frame sync: chunks arrive strictly in order (serial parser, single
-    // sender frame at a time), so a new frame id simply becomes current —
-    // u16 equality only, no wrap-around special case.
-    if (!haveCur_ || hdr.frame != curFrame_) {
-      curFrame_ = hdr.frame;
-      haveCur_ = true;
     }
     return (int)hdr.len;
   }

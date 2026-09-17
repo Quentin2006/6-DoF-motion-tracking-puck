@@ -31,6 +31,4 @@ public:
   FrameParser parser_;
   uint32_t pktSeq_ = 0;
   bool sendNow_ = true;
-  uint16_t curFrame_ = 0;
-  bool haveCur_ = false;
 };

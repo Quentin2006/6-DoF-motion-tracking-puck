@@ -27,7 +27,6 @@ constexpr float EKF_SIGMA_ACCEL = 0.02f;   // normalized-accel units (~0.2 m/s²
 constexpr float EKF_GATE_MAHA = 11.34f;    // chi2 3-dof 99%: reject above this
 constexpr float EKF_GATE_NORM = 0.35f;     // soft-gate scale: R deweights above this (step 5), reject far above
 constexpr float EKF_GATE_NORM_FAR = 0.70f; // 2x EKF_GATE_NORM: coast above this
-constexpr int8_t FUSION_AXIS_MAP[3] = {3, 2, 1}; // body=(+sz,+sy,+sx): pitch/roll inputs swapped per live test; sensor +X (up, ~9.8 at rest) to body +Z matching EKF gravity [0,0,1]
 
 // ------------------------------- DISPLAY -------------------------------
 // ESP32-S3 pin assignments

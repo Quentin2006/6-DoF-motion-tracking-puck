@@ -62,8 +62,7 @@ bool Mpu6050::readGyro(vec3 &out) {
   if (!readBurst6(kGyroBase, GYRO_LSB_TO_DPS, raw)) {
     return false;
   }
-  out = raw;
-  out -= gyro_bias;
+  out = {raw.x - gyro_bias.x, raw.y - gyro_bias.y, raw.z - gyro_bias.z};
   return true;
 }
 
@@ -72,8 +71,9 @@ bool Mpu6050::readAccel(vec3 &out) {
   if (!readBurst6(kAccelBase, ACCEL_LSB_O_MPS2, raw)) {
     return false;
   }
-  out = applyAccelCal(raw); // identity on first boot
-  out -= accel_bias;        // runtime offset seed only; never folded into accOff_
+  const vec3 c = applyAccelCal(raw); // identity on first boot
+  // runtime offset seed only; never folded into accOff_
+  out = {c.x - accel_bias.x, c.y - accel_bias.y, c.z - accel_bias.z};
   return true;
 }
 
@@ -89,15 +89,17 @@ bool Mpu6050::meanBurst(uint8_t baseReg, float scale, vec3 &out) {
   for (int i = 0; i < GYRO_CALIB_SAMPLES; ++i) {
     delay(MPU_CALIB_DELAY_MS);
     if (readBurst6(baseReg, scale, s)) {
-      total += s;
+      total.x += s.x;
+      total.y += s.y;
+      total.z += s.z;
       ++ok;
     }
   }
   if (ok == 0) {
     return false;
   }
-  total /= (float)ok;
-  out = total;
+  const float inv = 1.0f / (float)ok;
+  out = {total.x * inv, total.y * inv, total.z * inv};
   return true;
 }
 
@@ -119,7 +121,8 @@ bool Mpu6050::getAccelBias() {
   }
   // Tilt-robust: keep gravity, subtract the sensor offset along the measured
   // direction, so accel_bias holds the offset only and readAccel preserves g.
-  accel_bias = m * (1.0f - GRAVITY_MPS2 / n);
+  const float k = 1.0f - GRAVITY_MPS2 / n;
+  accel_bias = {m.x * k, m.y * k, m.z * k};
   return true;
 }
 
@@ -201,15 +204,14 @@ void Mpu6050::saveAccelCal() const {
   prefs.end();
 }
 
-// Clamp one still-detect bias step (dps) so a single noisy window cannot yank
-// the bias.
-static float clampStep(float v) {
+// One still-detect bias step (dps), clamped so a single noisy window cannot
+// yank the bias.
+void Mpu6050::nudgeGyroBias(const vec3 &meanDps, float alpha) {
   constexpr float kMaxStepDps = 0.002f;
-  return v > kMaxStepDps ? kMaxStepDps : (v < -kMaxStepDps ? -kMaxStepDps : v);
-}
-
-void Mpu6050::nudgeGyroBias(const vec3 &residualDps, float alpha) {
-  gyro_bias.x += clampStep(alpha * residualDps.x);
-  gyro_bias.y += clampStep(alpha * residualDps.y);
-  gyro_bias.z += clampStep(alpha * residualDps.z);
+  const float sx = alpha * meanDps.x;
+  const float sy = alpha * meanDps.y;
+  const float sz = alpha * meanDps.z;
+  gyro_bias.x += sx > kMaxStepDps ? kMaxStepDps : (sx < -kMaxStepDps ? -kMaxStepDps : sx);
+  gyro_bias.y += sy > kMaxStepDps ? kMaxStepDps : (sy < -kMaxStepDps ? -kMaxStepDps : sy);
+  gyro_bias.z += sz > kMaxStepDps ? kMaxStepDps : (sz < -kMaxStepDps ? -kMaxStepDps : sz);
 }

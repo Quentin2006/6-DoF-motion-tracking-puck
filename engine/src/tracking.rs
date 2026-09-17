@@ -102,8 +102,7 @@ const SERIAL_BAUD: u32 = 921600;
 const VIDEO_W: usize = 320;
 const VIDEO_H: usize = 240;
 const VIDEO_PAYLOAD_MAX: usize = 1280; // 2 rows x 320 px x 2 B
-const VIDEO_CHUNK_ROWS: usize = VIDEO_PAYLOAD_MAX / (VIDEO_W * 2); // 2
-const VIDEO_CHUNKS: usize = VIDEO_H / VIDEO_CHUNK_ROWS; // 120
+const VIDEO_CHUNKS: usize = 120; // 240 rows / 2 rows per 1280 B chunk
 const VIDEO_FRAME_BYTES: usize = VIDEO_W * VIDEO_H * 2; // 153600 RGB565
 
 struct Frame {
@@ -143,6 +142,27 @@ fn build_frame(out: &mut [u8], ty: u8, payload: &[u8]) -> usize {
     out[5 + payload.len()] = (crc & 0xFF) as u8;
     out[5 + payload.len() + 1] = ((crc >> 8) & 0xFF) as u8;
     5 + payload.len() + 2
+}
+
+// Encode one dirty chunk and burst it as a FRAME_VIDEO / FRAME_VIDEO_RLE
+// frame. Raw fallback when incompressible (the RLE worst case exceeds the
+// raw size, so the comparison is strict — equal-or-larger stays raw).
+fn send_chunk(writer: &mut Box<dyn serialport::SerialPort>, id: u16, chunk: usize, bytes: &[u8]) {
+    let enc = rle_encode_565(bytes);
+    let (ty, body): (u8, &[u8]) = if enc.len() < VIDEO_PAYLOAD_MAX {
+        (FRAME_VIDEO_RLE, &enc)
+    } else {
+        (FRAME_VIDEO, bytes)
+    };
+    let mut payload = [0u8; 8 + VIDEO_PAYLOAD_MAX];
+    payload[0..2].copy_from_slice(&id.to_le_bytes());
+    payload[2..4].copy_from_slice(&(chunk as u16).to_le_bytes());
+    payload[4..6].copy_from_slice(&(VIDEO_CHUNKS as u16).to_le_bytes());
+    payload[6..8].copy_from_slice(&(body.len() as u16).to_le_bytes());
+    payload[8..8 + body.len()].copy_from_slice(body);
+    let mut frame = [0u8; 7 + 8 + VIDEO_PAYLOAD_MAX];
+    let n = build_frame(&mut frame, ty, &payload[..8 + body.len()]);
+    let _ = writer.write_all(&frame[..n]);
 }
 
 #[derive(Default)]
@@ -278,20 +298,6 @@ fn open_puck_port() -> Box<dyn serialport::SerialPort> {
         .unwrap_or_else(|e| panic!("open serial {name} (PUCK_SERIAL={name}): {e:?}"))
 }
 
-
-#[inline]
-fn f(raw: &[u8], i: usize) -> f32 {
-    f32::from_le_bytes([raw[i], raw[i + 1], raw[i + 2], raw[i + 3]])
-}
-
-#[inline]
-fn header(raw: &[u8]) -> (u32, u32) {
-    (
-        u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]),
-        u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]),
-    )
-}
-
 #[allow(dead_code)] // stamp asserted by tests; live path keys off seq only
 struct Pose {
     seq: u32,
@@ -300,11 +306,15 @@ struct Pose {
     gyro: Vec3,
 }
 
+#[inline]
+fn f(raw: &[u8], i: usize) -> f32 {
+    f32::from_le_bytes([raw[i], raw[i + 1], raw[i + 2], raw[i + 3]])
+}
+
 fn parse_pose(raw: &[u8]) -> Pose {
-    let (seq, stamp) = header(raw);
     Pose {
-        seq,
-        stamp,
+        seq: u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]),
+        stamp: u32::from_le_bytes([raw[4], raw[5], raw[6], raw[7]]),
         q: Quat::from_xyzw(f(raw, 8), f(raw, 12), f(raw, 16), f(raw, 20)),
         // Body-frame gyro rad/s.
         gyro: Vec3::new(f(raw, 24), f(raw, 28), f(raw, 32)),
@@ -453,24 +463,7 @@ fn setup_scene(
             }
             for chunk in dirty {
                 let out = &frm.bytes[chunk * VIDEO_PAYLOAD_MAX..(chunk + 1) * VIDEO_PAYLOAD_MAX];
-                // Compress per chunk; raw fallback when incompressible (the
-                // RLE worst case exceeds the raw size, so the comparison is
-                // strict — equal-or-larger stays raw and always legal).
-                let enc = rle_encode_565(out);
-                let (ty, body): (u8, &[u8]) = if enc.len() < VIDEO_PAYLOAD_MAX {
-                    (FRAME_VIDEO_RLE, &enc)
-                } else {
-                    (FRAME_VIDEO, out)
-                };
-                let mut payload = [0u8; 8 + VIDEO_PAYLOAD_MAX];
-                payload[0..2].copy_from_slice(&frm.id.to_le_bytes());
-                payload[2..4].copy_from_slice(&(chunk as u16).to_le_bytes());
-                payload[4..6].copy_from_slice(&(VIDEO_CHUNKS as u16).to_le_bytes());
-                payload[6..8].copy_from_slice(&(body.len() as u16).to_le_bytes());
-                payload[8..8 + body.len()].copy_from_slice(body);
-                let mut frame = [0u8; 7 + 8 + VIDEO_PAYLOAD_MAX];
-                let n = build_frame(&mut frame, ty, &payload[..8 + body.len()]);
-                let _ = writer.write_all(&frame[..n]);
+                send_chunk(&mut writer, frm.id, chunk, out);
             }
             let _ = return_tx.send(frm.bytes);
         }

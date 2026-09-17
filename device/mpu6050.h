@@ -7,29 +7,6 @@ struct vec3 {
   float x = 0;
   float y = 0;
   float z = 0;
-
-  vec3 &operator+=(const vec3 &rhs) {
-    this->x += rhs.x;
-    this->y += rhs.y;
-    this->z += rhs.z;
-    return *this;
-  }
-
-  vec3 &operator-=(const vec3 &rhs) {
-    this->x -= rhs.x;
-    this->y -= rhs.y;
-    this->z -= rhs.z;
-    return *this;
-  }
-
-  vec3 &operator/=(const float rhs) {
-    this->x /= rhs;
-    this->y /= rhs;
-    this->z /= rhs;
-    return *this;
-  }
-
-  vec3 operator*(const float rhs) const { return {x * rhs, y * rhs, z * rhs}; }
 };
 
 class Mpu6050 {
@@ -45,7 +22,7 @@ public:
 
   void setAccelCal(const float off[3], const float scale[3]); // persist to NVS
   void getAccelCal(float off[3], float scale[3]) const;
-  void nudgeGyroBias(const vec3 &residualDps, float alpha); // still-detect re-bias, no I2C
+  void nudgeGyroBias(const vec3 &meanDps, float alpha); // still-detect re-bias, no I2C
 
 private:
   bool writeReg(uint8_t reg, uint8_t val);
