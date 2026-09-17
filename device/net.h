@@ -5,33 +5,28 @@
 #include <WiFiUdp.h>
 class Net {
 public:
-  // WiFi.mode(WIFI_STA), setSleep(WIFI_PS_NONE), setAutoReconnect, WiFi.begin,
-  // block up to 15 s for WL_CONNECTED, then udp.begin(port). Returns false on WiFi failure.
-  bool begin(const char *ssid, const char *pwd, const char *ip, uint16_t port);
-  // Bind the dedicated video RX socket (engine -> device). Advisory: false
-  // keeps tracking-only; never fails setup.
-  bool beginVideo(uint16_t port);
+  // WiFi STA (modem sleep off, auto-reconnect), block up to 15 s for
+  // WL_CONNECTED, then udp_.begin(UDP_PORT). false on WiFi failure.
+  bool begin(const char *ssid, const char *pwd);
+  // Bind the engine -> device video RX socket. Advisory: false keeps
+  // tracking-only; never fails setup.
+  bool beginVideo();
 
-  // Build 36B packet (seq u32 + stamp u32 + quat xyz w + gyro xyz f32 LE, all
-  // from config.h offset scheme) and send to ip:port. Send ~250 Hz: internally
-  // alternates (first call sends, second skips, ...) matching the old `(tick & 1)`.
-  // pktSeq_ increments only on an actual send. Also advances the alternating flag
-  // on skipped calls so the decimation cadence is preserved.
-  void sendQuat(const float quat[4], const float gyro[3], uint32_t stamp);
+  // Exactly one non-blocking datagram per call. Parses the 8 B header into hdr
+  // and copies the payload into `out` (which must hold VIDEO_PAYLOAD_MAX bytes).
+  // Returns payload bytes, or 0 when there is no datagram / the header is short
+  // / the declared length is out of range. A chunk is never split across calls.
+  int pollVideoChunk(uint8_t *out, VideoChunkHdr &hdr);
 
-  // Video RX (engine -> device, port VIDEO_UDP_PORT): exactly one non-blocking
-  // parsePacket + read per call. Parses the 8 B header into hdr, copies the
-  // payload into payload_out (must be >= VIDEO_PAYLOAD_MAX bytes).
-  // Returns payload bytes, or 0 when no datagram / header short.
-  int pollVideoChunk(uint8_t *payload_out, VideoChunkHdr &hdr);
+  // Build the 36 B v2 packet (stamp = micros()) and send to ENGINE_IP:UDP_PORT.
+  // ~250 Hz: alternates send/skip per call, matching the 500 Hz tick rate.
+  void sendQuat(const float quat[4], const float gyro[3]);
 
   uint32_t sequence() const { return pktSeq_; }
 
 private:
   WiFiUDP udp_;
   WiFiUDP video_;
-  const char *ip_ = nullptr;
-  uint16_t port_ = 0;
   uint32_t pktSeq_ = 0;
   bool sendNow_ = true;
 };

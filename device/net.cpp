@@ -1,9 +1,7 @@
 #include "net.h"
 #include "packet.h"
 
-bool Net::begin(const char *ssid, const char *pwd, const char *ip, uint16_t port) {
-  ip_ = ip;
-  port_ = port;
+bool Net::begin(const char *ssid, const char *pwd) {
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(WIFI_PS_NONE); // modem-sleep off: kills 10-100ms jitter bursts
   WiFi.setAutoReconnect(true);
@@ -15,58 +13,38 @@ bool Net::begin(const char *ssid, const char *pwd, const char *ip, uint16_t port
       return false;
     }
   }
-  udp_.begin(port);
+  udp_.begin(UDP_PORT);
   return true;
 }
 
-bool Net::beginVideo(uint16_t port) {
-  return video_.begin(port) == 1;
+bool Net::beginVideo() {
+  return video_.begin(VIDEO_UDP_PORT) == 1;
 }
 
-int Net::pollVideoChunk(uint8_t *payload_out, VideoChunkHdr &hdr) {
-  if (!payload_out) {
-    return 0;
-  }
-  int n = video_.parsePacket();
+int Net::pollVideoChunk(uint8_t *out, VideoChunkHdr &hdr) {
+  const int n = video_.parsePacket();
   if (n <= 0) {
     return 0;
   }
-  uint8_t hdrBuf[VIDEO_HDR_LEN];
-  int hr = video_.read(hdrBuf, sizeof hdrBuf);
-  if (hr < (int)VIDEO_HDR_LEN) {
-    video_.flush();
-    return 0;
-  }
-  if (!parse_video_header(hdrBuf, sizeof hdrBuf, hdr)) {
-    video_.flush();
-    return 0;
-  }
-  int want = (int)hdr.len;
-  int cap = n - (int)VIDEO_HDR_LEN;
-  if (want <= 0 || want > (int)VIDEO_PAYLOAD_MAX || want > cap) {
-    video_.flush();
-    return 0;
-  }
-  int got = video_.read(payload_out, (size_t)want);
-  if (got < want) {
-    video_.flush();
-    return 0;
-  }
-  // One packet buffered at a time; remainder (if any) belongs to no chunk.
-  video_.flush();
-  return want;
+  uint8_t hb[VIDEO_HDR_LEN];
+  bool ok = video_.read(hb, sizeof hb) == (int)sizeof hb;
+  ok = ok && parse_video_header(hb, sizeof hb, hdr);
+  ok = ok && hdr.len > 0 && hdr.len <= VIDEO_PAYLOAD_MAX && hdr.len <= n - (int)VIDEO_HDR_LEN;
+  ok = ok && video_.read(out, hdr.len) == (int)hdr.len;
+  video_.flush(); // remaining bytes (if any) belong to no chunk
+  return ok ? (int)hdr.len : 0;
 }
 
-void Net::sendQuat(const float quat[4], const float gyro[3], uint32_t stamp) {
-  bool doSend = sendNow_;
+void Net::sendQuat(const float quat[4], const float gyro[3]) {
+  const bool doSend = sendNow_;
   sendNow_ = !sendNow_;
-
-  uint8_t pkt[QUAT_PACKET_LEN_V2];
-  build_quat_packet(pkt, pktSeq_, stamp, quat, gyro);
-  if (doSend) {
-    udp_.beginPacket(ip_, port_);
-    udp_.write(pkt, QUAT_PACKET_LEN_V2);
-    udp_.endPacket();
-    pktSeq_++;
+  if (!doSend) {
+    return;
   }
+  uint8_t pkt[QUAT_PACKET_LEN_V2];
+  build_quat_packet(pkt, pktSeq_, micros(), quat, gyro);
+  udp_.beginPacket(ENGINE_IP, UDP_PORT);
+  udp_.write(pkt, QUAT_PACKET_LEN_V2);
+  udp_.endPacket();
+  pktSeq_++;
 }
