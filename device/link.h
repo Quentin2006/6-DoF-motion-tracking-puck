@@ -7,17 +7,18 @@
 class UsbLink {
 public:
   // Grow the CDC RX buffer (default 256 B) before Serial.begin so paced video
-  // bursts fit; baud is nominal on S3 native USB, kept for UART fallback.
+  // bursts fit. The 1a86:55d3 panel bridge is a real UART: baud is wire
+  // speed, 921600 keeps a compressed 10 fps stream under budget.
   // Always returns true (nothing to fail).
-  bool begin(unsigned long baud = 115200, size_t rxBuf = 4096);
+  bool begin(unsigned long baud = 921600, size_t rxBuf = 4096);
 
-  // Moves at most one segment out of the Serial queue per call, then pumps
-  // it through the frame parser, returning at most one video chunk (never
-  // a drain — that would starve 500 Hz fusion under a back-to-back video
-  // burst). Parses the 8 B header into hdr and copies the payload into
-  // `out` (must hold VIDEO_PAYLOAD_MAX bytes). Returns payload bytes, or 0
-  // when no complete FRAME_VIDEO frame arrived / the header is short / the
-  // length is out of range.
+  // Streaming pump: consume at most one segment per call, return at most one
+  // video chunk (never a drain — that would starve 500 Hz fusion). Parses
+  // the 8 B header into hdr and copies the payload into `out`, which must
+  // be 4-byte aligned and hold VIDEO_PAYLOAD_MAX bytes with
+  // hdr.len == VIDEO_PAYLOAD_MAX (Display::chunk blits it via SPI DMA word
+  // reads). Returns payload bytes, or 0 when no complete FRAME_VIDEO frame
+  // arrived / the header is short / the length is out of range.
   int pollVideoChunk(uint8_t *out, VideoChunkHdr &hdr);
 
   // Build the 36 B v2 packet (stamp = micros()) and write one FRAME_POSE
@@ -27,8 +28,9 @@ public:
 
   uint32_t sequence() const { return pktSeq_; }
 
-private:
   FrameParser parser_;
   uint32_t pktSeq_ = 0;
   bool sendNow_ = true;
+  uint16_t curFrame_ = 0;
+  bool haveCur_ = false;
 };

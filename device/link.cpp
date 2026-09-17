@@ -35,16 +35,37 @@ int UsbLink::pollVideoChunk(uint8_t *out, VideoChunkHdr &hdr) {
     if (!parser_.push(rxBuf[i], type, payload, len)) {
       continue;
     }
-    if (type != FRAME_VIDEO) {
+    if (type != FRAME_VIDEO && type != FRAME_VIDEO_RLE) {
       continue;
     }
     bool ok = parse_video_header(payload, len, hdr);
-    ok = ok && hdr.len > 0 && hdr.len <= VIDEO_PAYLOAD_MAX &&
-         (size_t)hdr.len + VIDEO_HDR_LEN <= len;
+    ok = ok && hdr.len > 0 && (size_t)hdr.len + VIDEO_HDR_LEN <= len;
     if (!ok) {
       continue;
     }
-    memcpy(out, payload + VIDEO_HDR_LEN, hdr.len);
+    if (type == FRAME_VIDEO) {
+      // Raw path: hdr.len must be the full chunk (Display::chunk blits a
+      // fixed 2-row window; hdr.len == VIDEO_PAYLOAD_MAX per the link.h
+      // alignment contract).
+      if (hdr.len != VIDEO_PAYLOAD_MAX) {
+        continue;
+      }
+      memcpy(out, payload + VIDEO_HDR_LEN, hdr.len);
+    } else {
+      // RLE path: decode into the caller's aligned buffer (out is 16-bit
+      // aligned per the link.h contract); decode failure drops the chunk.
+      if (!rle_decode_565(payload + VIDEO_HDR_LEN, hdr.len, (uint16_t *)out)) {
+        continue;
+      }
+      hdr.len = VIDEO_PAYLOAD_MAX;
+    }
+    // Frame sync: chunks arrive strictly in order (serial parser, single
+    // sender frame at a time), so a new frame id simply becomes current —
+    // u16 equality only, no wrap-around special case.
+    if (!haveCur_ || hdr.frame != curFrame_) {
+      curFrame_ = hdr.frame;
+      haveCur_ = true;
+    }
     return (int)hdr.len;
   }
   return 0;

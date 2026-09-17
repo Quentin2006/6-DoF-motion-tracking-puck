@@ -42,10 +42,13 @@ void loop() {
     usbLink.sendQuat(tracker.quat(), tracker.gyro());
   }
   // Video: one chunk per loop max (never a drain — it starves 500 Hz fusion).
-  VideoChunkHdr hdr;
-  uint8_t buf[VIDEO_PAYLOAD_MAX];
-  const int n = usbLink.pollVideoChunk(buf, hdr);
-  display.chunk(hdr, (const uint16_t *)buf, n); // n <= 0: no-op
+  // vidBuf must be 4-byte aligned: Display::chunk -> writePixels SPI DMA
+  // reads 16-bit words, and a misaligned stack byte buffer corrupts on word
+  // boundaries (periodic per-pixel pattern).
+  alignas(4) static uint16_t vidBuf[VIDEO_PAYLOAD_MAX / 2];
+  VideoChunkHdr hdr = {};
+  const int n = usbLink.pollVideoChunk((uint8_t *)vidBuf, hdr);
+  display.chunk(hdr, vidBuf, n); // n <= 0: no-op
   tracker.report(usbLink.sequence());
   display.tick(millis());
 }
