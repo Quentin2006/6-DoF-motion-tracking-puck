@@ -25,4 +25,6 @@ test:
 	mkdir -p build
 	g++ -std=c++17 -Idevice tests/packet_test.cpp -o build/packet_test
 	./build/packet_test tests/packet_fixture.txt
+	g++ -std=c++17 -Idevice tests/frame_test.cpp -o build/frame_test
+	./build/frame_test
 	cd engine && cargo test
