@@ -3,9 +3,13 @@
 #include <cstdint>
 #include <cstring>
 
-// Video wire contract: engine -> device raw 320x240 RGB565 frame fragments on
-// UDP VIDEO_UDP_PORT, landscape (90 deg CW from portrait 0).
-constexpr uint16_t VIDEO_UDP_PORT = 3334;
+// Video wire contract: engine -> device raw 320x240 RGB565 frame fragments as
+// FRAME_VIDEO frames (device/frame.h) over the single USB-CDC port, landscape
+// (90 deg CW from portrait 0).
+// Pacing agreement: VIDEO_FRAME_PERIOD_MS = 200 (5 fps; USB full-speed bulk
+// cannot carry 10 fps raw); per-chunk deadline ~1666 us.
+// The engine is the sender; this header is the norm.
+constexpr int VIDEO_FRAME_PERIOD_MS = 200;
 constexpr int VIDEO_W = 320;
 constexpr int VIDEO_H = 240;
 constexpr size_t VIDEO_PAYLOAD_MAX = 1280;                          // 2 rows x 320 px x 2 B
