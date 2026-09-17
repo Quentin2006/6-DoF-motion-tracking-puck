@@ -424,6 +424,7 @@ fn update(
         let load = |a: &AtomicU64| a.swap(0, Ordering::Relaxed);
         let c = &stats.inner;
         let poses = load(&c.poses);
+        let rdrops = load(&c.reader_drops);
         let gaps = load(&c.gap_events);
         let lost_sum = load(&c.gap_lost);
         let readbacks = load(&c.readbacks);
@@ -438,7 +439,7 @@ fn update(
         let dirty_avg = if frames > 0 { dirty_sum / frames } else { 0 };
         let wr_avg = if frames > 0 { wr_sum / frames } else { 0 };
         eprintln!(
-            "link poseFps={poses} gaps={gaps} lost={lost_sum} readbackFps={readbacks} offered={offered} droppedFull={dropped_full} frames={frames} dirtyAvg={dirty_avg} dirtyMax={dirty_max} vidKB={} wrAvgUs={wr_avg} wrMaxUs={wr_max}",
+            "link poseFps={poses} rdrop={rdrops} gaps={gaps} lost={lost_sum} readbackFps={readbacks} offered={offered} droppedFull={dropped_full} frames={frames} dirtyAvg={dirty_avg} dirtyMax={dirty_max} vidKB={} wrAvgUs={wr_avg} wrMaxUs={wr_max}",
             vid_b / 1024,
         );
     }
