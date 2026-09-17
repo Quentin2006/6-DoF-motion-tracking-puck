@@ -101,6 +101,6 @@ void AccelCalibrator::run(Mpu6050 &mpu) {
     return;
   }
   mpu.setAccelCal(off, scale);
-  mpu.getAccelBias(GYRO_CALIB_SAMPLES); // re-seed runtime offset residual
+  mpu.getAccelBias(); // re-seed the runtime offset residual
   Serial.println("CAL6 saved; reboot");
 }

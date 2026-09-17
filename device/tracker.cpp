@@ -21,8 +21,8 @@ bool Tracker::begin() {
 }
 
 void Tracker::calibrate() {
-  mpu_.getAccelBias(GYRO_CALIB_SAMPLES);
-  mpu_.getGyroBias(GYRO_CALIB_SAMPLES);
+  mpu_.getAccelBias();
+  mpu_.getGyroBias();
 }
 
 void Tracker::printAccelCal() {
@@ -88,8 +88,7 @@ Tracker::Step Tracker::step(float dt) {
   float bnorm = sqrtf(bax * bax + bay * bay + baz * baz);
   // Still detector: driver-frame gyro (pre-remap) + body accel norm.
   if (still_.update(gyro.x, gyro.y, gyro.z, bnorm)) {
-    vec3 resid = still_.residualDps();
-    mpu_.nudgeGyroBias(resid.x, resid.y, resid.z, still_.alpha());
+    mpu_.nudgeGyroBias(still_.residualDps(), still_.alpha());
   }
   if (still_.justExited()) {
     Serial.println("still exit");
