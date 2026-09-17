@@ -43,9 +43,5 @@ jobs:
           arduino-cli core install esp32:esp32
       - name: Install display libs
         run: arduino-cli lib install "Adafruit GFX Library" "Adafruit ST7735 and ST7789 Library"
-      # config.h includes device/secrets.h unconditionally; materialize the
-      # placeholder so the sketch compiles. Real secrets are never committed.
-      - name: Materialize secrets from example
-        run: cp device/secrets.h.example device/secrets.h
       - name: Compile firmware
         run: arduino-cli compile --fqbn esp32:esp32:esp32s3 device

@@ -18,7 +18,6 @@ constexpr int GYRO_CALIB_SAMPLES = 200; // ±2000dps noise floor is 8x the old �
 constexpr float ACCEL_LSB_O_MPS2 = 9.80665f / 4096.0f; // ±8 g
 constexpr float GYRO_LSB_TO_DPS = 1.0f / 16.4f;         // ±2000 dps
 constexpr float GRAVITY_MPS2 = 9.80665f;
-constexpr uint16_t UDP_PORT = 3333;      // must match engine/src/tracking.rs UDP_PORT
 constexpr int FUSION_RATE_HZ = 500;
 constexpr unsigned long STATUS_PERIOD_MS = 1000; // 1 Hz Serial status line (Tracker::report)
 constexpr float DPS_TO_RPS = 3.14159265f / 180.0f; // deg/s to rad/s
@@ -28,7 +27,6 @@ constexpr float EKF_SIGMA_ACCEL = 0.02f;   // normalized-accel units (~0.2 m/s²
 constexpr float EKF_GATE_MAHA = 11.34f;    // chi2 3-dof 99%: reject above this
 constexpr float EKF_GATE_NORM = 0.35f;     // soft-gate scale: R deweights above this (step 5), reject far above
 constexpr float EKF_GATE_NORM_FAR = 0.70f; // 2x EKF_GATE_NORM: coast above this
-constexpr int8_t FUSION_AXIS_MAP[3] = {3, 2, 1}; // body=(+sz,+sy,+sx): pitch/roll inputs swapped per live test; sensor +X (up, ~9.8 at rest) to body +Z matching EKF gravity [0,0,1]
 
 // ------------------------------- DISPLAY -------------------------------
 // ESP32-S3 pin assignments
@@ -40,7 +38,7 @@ constexpr int TFT_RST = 8;
 constexpr int TFT_BL = 7;
 constexpr int TFT_W = 240;
 constexpr int TFT_H = 320;
-constexpr uint32_t TFT_SPI_FREQ = 40000000; // conservative 40 MHz; raise only if frames tear
+constexpr uint32_t TFT_SPI_FREQ = 62500000; // 62.5 MHz: ST7789VW §7.4.3 Table 6 TSCYCW min 16 ns write cycle; fallback 40 MHz on any tear
 constexpr unsigned long DISPLAY_COLOR_PERIOD_MS = 5000; // solid RGB cycle step
 
 // ------------------------------- STATUS LED -------------------------------
@@ -53,5 +51,3 @@ constexpr int RGB_LED_PIN = RGB_BUILTIN;
 constexpr int RGB_LED_PIN = 48; // onboard WS2812 on most S3 boards
 #endif
 
-// WiFi credentials live in secrets.h (gitignored, see secrets.h.example).
-#include "secrets.h"

@@ -1,4 +1,7 @@
 default_fqbn: esp32:esp32:esp32s3
 default_port: /dev/ttyACM0
 default_port_config:
-  baudrate: 115200
+  baudrate: 921600
+# Native USB (USB port, not COM): enumerates as 303a:1001 Espressif
+# USB-JTAG/serial. Baud is don't-care on native CDC; the node stays
+# /dev/ttyACM0 here because the COM cable is unplugged while native runs.
