@@ -1,5 +1,5 @@
 .PHONY: all clean lsp compile upload monitor engine device test
-FQBN ?= esp32:esp32:esp32s3
+FQBN ?= esp32:esp32:esp32s3:CDCOnBoot=cdc
 
 all: compile upload engine
 clean:
