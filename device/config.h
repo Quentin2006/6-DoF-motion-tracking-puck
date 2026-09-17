@@ -40,7 +40,6 @@ constexpr int TFT_RST = 8;
 constexpr int TFT_BL = 7;
 constexpr int TFT_W = 240;
 constexpr int TFT_H = 320;
-constexpr uint8_t TFT_ROTATION = 1; // landscape per user example
 constexpr uint32_t TFT_SPI_FREQ = 40000000; // conservative 40 MHz; raise only if frames tear
 constexpr unsigned long DISPLAY_COLOR_PERIOD_MS = 5000; // solid RGB cycle step
 
@@ -56,6 +55,3 @@ constexpr int RGB_LED_PIN = 48; // onboard WS2812 on most S3 boards
 
 // WiFi credentials live in secrets.h (gitignored, see secrets.h.example).
 #include "secrets.h"
-constexpr const char *ssid = WIFI_SSID;
-constexpr const char *pwd = WIFI_PASSWORD;
-constexpr const char *engine_ip = ENGINE_IP;

@@ -1,36 +1,31 @@
+#include <Arduino.h> // first: defines RGB_BUILTIN, used by config.h
 #include "config.h"
 #include "tracker.h"
 #include "net.h"
-#include "led.h"
 #include "display.h"
 #include "video.h"
-#include <Arduino.h>
 
 Tracker tracker;
 Net net;
-StatusLed led;
 Display display;
-unsigned long lastStatusMs = 0;
-unsigned long lastColorMs = 0;
-unsigned long videoActiveMs = 0;
-bool videoSeen = false;
-uint8_t colorIdx = 0;
+
+// Deterministic fail-stop: a puck with no IMU or no link has nothing to do.
+static void halt(const char *why) {
+  Serial.println(why);
+  while (true) {
+    delay(1000);
+  }
+}
 
 void setup() {
   Serial.begin(115200);
   delay(500);
-  led.red(); // calibrating / not ready
+  rgbLedWrite(RGB_LED_PIN, 255, 0, 0); // calibrating / not ready
   if (!tracker.begin()) {
-    Serial.println("MPU6050 init failed");
-    while (true) {
-      delay(100);
-    }
+    halt("MPU6050 init failed");
   }
   if (!net.begin(WIFI_SSID, WIFI_PASSWORD)) {
-    Serial.println("WiFi failed");
-    while (true) {
-      delay(1000);
-    }
+    halt("WiFi failed");
   }
   delay(500);
   Serial.println("calibrating...");
@@ -38,7 +33,7 @@ void setup() {
   Serial.println("calibrated");
   tracker.printAccelCal();
   Serial.println("send CAL6 within 5 s for accel cal");
-  (void)tracker.maybeRunAccelCal(5000UL);
+  tracker.maybeRunAccelCal(5000UL);
   while (Serial.available() > 0) {
     Serial.read();
   }
@@ -46,41 +41,19 @@ void setup() {
   if (!net.beginVideo()) {
     Serial.println("video bind failed; tracking-only");
   }
-  (void)display.begin(); // best-effort: tracking is authoritative, panel advisory
-  lastColorMs = millis();
-  led.green(); // calibrated, streaming
-  lastStatusMs = millis();
+  display.begin();
+  rgbLedWrite(RGB_LED_PIN, 0, 255, 0); // calibrated, streaming
 }
 
 void loop() {
   if (tracker.step()) {
     net.sendQuat(tracker.quat(), tracker.gyro());
   }
-  // Video: one datagram per loop max (never a drain — starves 500 Hz fusion).
-  // Chunks overwrite in place; loss tears, next frame_id keeps overwriting.
-  {
-    VideoChunkHdr hdr;
-    uint8_t buf[VIDEO_PAYLOAD_MAX];
-    int n = net.pollVideoChunk(buf, hdr);
-    if (n > 0) {
-      videoActiveMs = millis();
-      videoSeen = true;
-      int rows = n / (VIDEO_W * 2);
-      int y0 = (int)hdr.idx * 2;
-      if (rows > 0 && y0 + rows <= VIDEO_H && n == (int)hdr.len) {
-        display.writeChunk(0, y0, VIDEO_W, rows, (const uint16_t *)buf);
-      }
-    }
-  }
+  // Video: one datagram per loop max (never a drain — it starves 500 Hz fusion).
+  VideoChunkHdr hdr;
+  uint8_t buf[VIDEO_PAYLOAD_MAX];
+  const int n = net.pollVideoChunk(buf, hdr);
+  display.chunk(hdr, (const uint16_t *)buf, n); // n <= 0: no-op
   tracker.report(net.sequence());
-  const unsigned long nowMs = millis();
-  // RGB demo resumes only after 10 s of video silence so it never fights video.
-  // videoSeen keeps the first 10 s demo intact (videoActiveMs starts at 0).
-  if ((unsigned long)(nowMs - lastColorMs) >= DISPLAY_COLOR_PERIOD_MS &&
-      (!videoSeen || (unsigned long)(nowMs - videoActiveMs) > 10000UL)) {
-    lastColorMs = nowMs;
-    colorIdx = (uint8_t)((colorIdx + 1) % 3);
-    const uint16_t c = (colorIdx == 0) ? ST77XX_RED : (colorIdx == 1) ? ST77XX_GREEN : ST77XX_BLUE;
-    display.fill(c);
-  }
+  display.tick(millis());
 }

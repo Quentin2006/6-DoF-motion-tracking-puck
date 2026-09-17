@@ -3,35 +3,37 @@
 
 Display::Display() : tft_(TFT_CS, TFT_DC, TFT_RST) {}
 
-bool Display::begin() {
+void Display::begin() {
   pinMode(TFT_BL, OUTPUT);
   digitalWrite(TFT_BL, HIGH);
   SPI.begin(TFT_SCLK, -1, TFT_MOSI, TFT_CS);
   tft_.init(TFT_W, TFT_H);
   tft_.setSPISpeed(TFT_SPI_FREQ);
-  tft_.setRotation(TFT_ROTATION);
+  // Panel is mounted landscape, matching the engine's video frame layout.
+  tft_.setRotation(VIDEO_ROTATION);
   tft_.fillScreen(ST77XX_BLACK);
-  return true;
+  lastColorMs_ = millis();
 }
 
-void Display::writeChunk(int x, int y, int w, int h, const uint16_t *px) {
-  if (!px || w <= 0 || h <= 0 || x < 0 || y < 0) {
+void Display::chunk(const VideoChunkHdr &hdr, const uint16_t *px, int len) {
+  if (len != (int)VIDEO_PAYLOAD_MAX || hdr.idx >= VIDEO_CHUNKS) {
     return;
-  }
-  if (x + w > VIDEO_W || y + h > VIDEO_H) {
-    return;
-  }
-  if (!videoMode_) {
-    videoMode_ = true;
-    tft_.setRotation(VIDEO_ROTATION);
   }
   tft_.startWrite();
-  tft_.setAddrWindow((uint16_t)x, (uint16_t)y, (uint16_t)w, (uint16_t)h);
-  // writePixels takes non-const; payload buffer is caller-owned scratch.
-  tft_.writePixels(const_cast<uint16_t *>(px), (uint32_t)w * (uint32_t)h, true, false);
+  tft_.setAddrWindow(0, (uint16_t)(hdr.idx * VIDEO_CHUNK_ROWS), VIDEO_W, VIDEO_CHUNK_ROWS);
+  // Adafruit's 2nd argument is a PIXEL count (len * 2 bytes on the wire).
+  tft_.writePixels(const_cast<uint16_t *>(px), VIDEO_W * VIDEO_CHUNK_ROWS, true, false);
   tft_.endWrite();
+  lastChunkMs_ = millis();
 }
 
-void Display::fill(uint16_t color) {
-  tft_.fillScreen(color);
+void Display::tick(unsigned long now) {
+  const bool videoIdle = lastChunkMs_ == 0 || (unsigned long)(now - lastChunkMs_) > 10000UL;
+  if (!videoIdle || (unsigned long)(now - lastColorMs_) < DISPLAY_COLOR_PERIOD_MS) {
+    return;
+  }
+  lastColorMs_ = now;
+  static const uint16_t kColors[3] = {ST77XX_RED, ST77XX_GREEN, ST77XX_BLUE};
+  colorIdx_ = (uint8_t)((colorIdx_ + 1) % 3);
+  tft_.fillScreen(kColors[colorIdx_]);
 }
