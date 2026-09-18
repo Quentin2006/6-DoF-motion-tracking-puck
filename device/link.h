@@ -1,6 +1,6 @@
 #pragma once
 #include "packet.h"
-#include "video.h"
+#include "src/display/video.h"
 #include "frame.h"
 #include <Arduino.h>
 

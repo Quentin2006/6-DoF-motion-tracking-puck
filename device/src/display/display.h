@@ -1,5 +1,5 @@
 #pragma once
-#include "config.h"
+#include "../../config.h"
 #include "video.h"
 #include <Adafruit_ST7789.h>
 #include <SPI.h>

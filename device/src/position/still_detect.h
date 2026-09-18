@@ -1,5 +1,5 @@
 #pragma once
-#include "config.h"
+#include "../../config.h"
 #include "mpu6050.h"   // vec3
 #include <math.h>
 

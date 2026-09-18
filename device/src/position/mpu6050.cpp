@@ -2,7 +2,7 @@
 #include <string.h>
 #include <Preferences.h>
 #include "mpu6050.h"
-#include "config.h"
+#include "../../config.h"
 
 // Register map: driver-internal, never tuned. FSR/DLPF choices (MPU_*_VAL)
 // stay in config.h next to the LSB scales they must agree with.

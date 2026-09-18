@@ -41,13 +41,16 @@ Two independent halves, no shared code, wired together by a single root
 | File | Role |
 |---|---|
 | `device.ino` | Orchestrator: `setup()` init/calib, 10-line `loop()` (tick → send → video chunk → report → panel tick) |
-| `config.h` | Single source of all compile-time constants (pins, FSR, gravity, UDP port, all EKF sigmas/gates, axis map, display pins) |
-| `tracker.{h,cpp}` | Pipeline glue + `micros()` scheduler + CAL6 accelerometer calibration + 1 Hz status line; owns `Mpu6050`, `Ekf6Dof`, `StillDetector` |
-| `mpu6050.{h,cpp}` | I2C driver + NVS accel-cal persistence (`Preferences`, namespace `mpu`, keys `ax0-2`/`as0-2`) |
-| `fusion.{h,cpp}` | `Ekf6Dof` — 6-state EKF (quat w,x,y,z + gyro bias) |
-| `still_detect.{h,cpp}` | `StillDetector` — gyro re-bias while stationary (50-tick window, variance/norm gates) |
-| `net.{h,cpp}` | WiFi STA + `WiFiUDP`, 36 B packet, alternator for ~250 Hz |
-| `packet.h` | Canonical 36 B UDP wire layout + `build_quat_packet()` — host-compilable, single source of the byte contract |
+| `config.h` | Single source of all compile-time constants (pins, FSR, gravity, CDC framing, all EKF sigmas/gates, axis map, display pins) |
+| `src/position/tracker.{h,cpp}` | Pipeline glue + `micros()` scheduler + CAL6 accelerometer calibration + 1 Hz status line; owns `Mpu6050`, `Ekf6Dof`, `StillDetector` |
+| `src/position/mpu6050.{h,cpp}` | I2C driver + NVS accel-cal persistence (`Preferences`, namespace `mpu`, keys `ax0-2`/`as0-2`) |
+| `src/position/fusion.{h,cpp}` | `Ekf6Dof` — 6-state EKF (quat w,x,y,z + gyro bias) |
+| `src/position/still_detect.{h,cpp}` | `StillDetector` — gyro re-bias while stationary (50-tick window, variance/norm gates) |
+| `link.{h,cpp}` | USB-CDC framed link (`Serial`): FRAME_POSE out, FRAME_VIDEO/FRAME_VIDEO_RLE in, pose/video counters |
+| `frame.h` | Framed CDC byte-stream contract (magic/type/len/CRC) — host-compilable, parsed by `link.cpp` and `engine/src/tracking.rs` |
+| `src/display/display.{h,cpp}` | ST7789 panel: per-row newest-wins framebuffer, chunk blit, idle RGB cycle |
+| `src/display/video.h` | Video wire contract: 320×240 RGB565 chunks + RLE decode — host-compilable, mirrored by `engine/src/tracking.rs` |
+| `packet.h` | Canonical 36 B pose payload + `build_quat_packet()` — host-compilable, single source of the byte contract |
 | `secrets.h` / `secrets.h.example` | WiFi credentials (`WIFI_SSID`, `WIFI_PASSWORD`, `ENGINE_IP`) |
 
 **Key module (`engine/`)**
@@ -200,8 +203,8 @@ verification stays manual.
 **Still manual / no automation:**
 - **Compile gate** locally: `make compile` — keep green after any `device/` change.
 - **On-device:** `make upload` + `make monitor` = the interactive loop. The serial
-  CAL6 procedure (`Tracker::maybeRunAccelCal` / `runAccelCal` in `tracker.cpp`)
-  calibrates the accelerometer (6 poses); `device/still_detect.cpp` re-biases
+  CAL6 procedure (`Tracker::maybeRunAccelCal` / `runAccelCal` in `src/position/tracker.cpp`)
+  calibrates the accelerometer (6 poses); `src/position/still_detect.cpp` re-biases
   gyro while still. The onboard LED goes red→green once streaming; the 1 Hz
   `q`/`seq`/`tick`/`over`/`gate`/`bg`/`st` line comes from `Tracker::report`.
 - **Host render:** `make engine` binds UDP `0.0.0.0:3333` and renders the rig.
