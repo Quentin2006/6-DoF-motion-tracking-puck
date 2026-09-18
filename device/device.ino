@@ -1,10 +1,10 @@
 #include <Arduino.h> // first: defines RGB_BUILTIN, used by config.h
 #include "config.h"
-#include "tracker.h"
+#include "src/position/tracker.h"
 #include "packet.h"
 #include "link.h"
-#include "display.h"
-#include "video.h"
+#include "src/display/display.h"
+#include "src/display/video.h"
 
 Tracker tracker;
 UsbLink usbLink;

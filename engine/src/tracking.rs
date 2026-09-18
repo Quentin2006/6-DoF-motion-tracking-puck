@@ -24,7 +24,7 @@ const FRAME_VIDEO_RLE: u8 = 0x03;
 const FRAME_MAX_PAYLOAD: usize = 1288;
 
 // Per-chunk RLE over the 640 u16 LE words of one chunk (must mirror
-// rle_decode_565 in device/video.h). Bit7 = 1 run (count 1..128 + one LE
+// rle_decode_565 in device/src/display/video.h). Bit7 = 1 run (count 1..128 + one LE
 // word), bit7 = 0 literal (count 1..128 + count LE words); a zero count
 // nibble encodes 128. Worst case (alternating words) is ~1310 B, so the
 // caller falls back to raw whenever the encoding is not strictly smaller.
@@ -98,7 +98,7 @@ const DEFAULT_SERIAL_PORT: &str = "/dev/ttyACM0";
 const SERIAL_BAUD: u32 = 921600;
 
 // Video stream to the puck panel: 320x240 RGB565 as FRAME_VIDEO frames.
-// Must match device/video.h VIDEO_* constants.
+// Must match device/src/display/video.h VIDEO_* constants.
 const VIDEO_W: usize = 320;
 const VIDEO_H: usize = 240;
 const VIDEO_PAYLOAD_MAX: usize = 1280; // 2 rows x 320 px x 2 B
@@ -586,7 +586,7 @@ mod tests {
         assert!(!yielded, "corrupted frame must be rejected");
     }
 
-    // Decode mirror of device/video.h rle_decode_565 (test-only): the same
+    // Decode mirror of device/src/display/video.h rle_decode_565 (test-only): the same
     // scheme the sender's rle_encode_565 must invert.
     fn rle_decode_test(inp: &[u8]) -> Option<Vec<u16>> {
         let mut out = Vec::new();
