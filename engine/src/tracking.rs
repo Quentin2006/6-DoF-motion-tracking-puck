@@ -80,16 +80,6 @@ fn rle_encode_565(chunk: &[u8]) -> Vec<u8> {
     }
     out
 }
-// Dirty 2-row chunk indices where cur differs from prev (1280 B slices).
-fn dirty_chunks(prev: &[u8], cur: &[u8]) -> Vec<usize> {
-    debug_assert_eq!(prev.len(), VIDEO_FRAME_BYTES);
-    debug_assert_eq!(cur.len(), VIDEO_FRAME_BYTES);
-    prev.chunks_exact(VIDEO_PAYLOAD_MAX)
-        .zip(cur.chunks_exact(VIDEO_PAYLOAD_MAX))
-        .enumerate()
-        .filter_map(|(i, (p, c))| if p != c { Some(i) } else { None })
-        .collect()
-}
 // Transport+render delay extrapolated from packet gyro, and display smoothing.
 const PREDICT_TAU_S: f32 = 0.008;
 const SMOOTH_TAU_S: f32 = 0.006;
@@ -175,7 +165,7 @@ fn build_frame(out: &mut [u8], ty: u8, payload: &[u8]) -> usize {
     5 + payload.len() + 2
 }
 
-// Encode one dirty chunk into `frame_buf`, returning the frame bytes used (0
+// Encode one chunk into `frame_buf`, returning the frame bytes used (0
 // on encode failure, never). Raw fallback when incompressible (the RLE worst
 // case exceeds the raw size, so the comparison is strict).
 fn encode_chunk(frame_buf: &mut [u8], id: u16, chunk: usize, bytes: &[u8]) -> usize {
@@ -324,8 +314,9 @@ struct LinkCounters {
 }
 
 // Video sender queue to the puck panel over the same CDC port.
-// The render thread offers at most 10 fps (100 ms gate); the sender thread
-// bursts dirty chunks with no pacing — the 1a86 UART baud is the limiter.
+// The render thread offers at most ~1 fps (1000 ms gate); the sender thread
+// bursts the full 120-chunk frame (idx 0..119 ascending, newest frame wins)
+// with no pacing — the UART baud is the limiter.
 // frame_tx is 2-deep so the render thread never blocks
 #[derive(Resource)]
 struct VideoTx {
@@ -501,7 +492,7 @@ fn setup_scene(
             ));
         });
     // Open the CDC port once: the original handle goes to the pose reader
-    // thread, the clone to the paced video sender thread below.
+    // thread, the clone to the video sender thread below.
     let port = open_puck_port();
     let writer = port.try_clone().unwrap_or_else(|e| panic!("clone serial port: {e:?}"));
     let stats = LinkStats::default();
@@ -541,7 +532,9 @@ fn setup_scene(
                         if spill[i] == b'\n' {
                             if let Ok(s) = std::str::from_utf8(&spill[line_start..i]) {
                                 let t = s.trim_end_matches('\r');
-                                if t.starts_with("q ") {
+                                if t.starts_with("q ")
+                                    && t.bytes().all(|b| (0x20..=0x7e).contains(&b))
+                                {
                                     eprintln!("dev {t}");
                                 }
                             }
@@ -573,8 +566,8 @@ fn setup_scene(
         }
     });
     commands.insert_resource(SerialLink { pose_rx });
-    // Burst sender thread: owns the cloned serial handle, sends only dirty
-    // 2-row chunks with no pacing (native USB bulk needs none).
+    // Burst sender thread: owns the cloned serial handle, sends the whole
+    // 320x240 frame (all 120 2-row chunks, idx ascending) every gated frame.
     // Fire-and-forget; write errors ignored. Returned buffers recycle
     // through free_tx so the steady state allocates nothing.
     let (frame_tx, frame_rx) = sync_channel::<Frame>(2);
@@ -583,32 +576,26 @@ fn setup_scene(
     thread::spawn(move || {
         let stats = sender_stats;
         let mut writer = writer;
-        let mut prev = vec![0u8; VIDEO_FRAME_BYTES];
         // Reused burst buffer: 120 worst-case raw frames; grows never shrinks.
         let mut burst = Vec::<u8>::new();
         while let Ok(frm) = frame_rx.recv() {
             stats.inner.frames_sent.fetch_add(1, Ordering::Relaxed);
-            let mut dirty = dirty_chunks(&prev, &frm.bytes);
-            prev.copy_from_slice(&frm.bytes);
-            if dirty.is_empty() {
-                dirty.push(0); // heartbeat: keeps device idle timer fresh
-            }
             let t0 = Instant::now();
             burst.clear();
             let mut scratch = [0u8; 7 + 8 + VIDEO_PAYLOAD_MAX];
-            for chunk in &dirty {
+            for chunk in 0..VIDEO_CHUNKS {
                 let out = &frm.bytes[chunk * VIDEO_PAYLOAD_MAX..(chunk + 1) * VIDEO_PAYLOAD_MAX];
-                let n = encode_chunk(&mut scratch, frm.id, *chunk, out);
+                let n = encode_chunk(&mut scratch, frm.id, chunk, out);
                 burst.extend_from_slice(&scratch[..n]);
             }
             let bytes = burst.len() as u64;
             let ok = writer.write_all(&burst).is_ok();
             let us = t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
-            stats.inner.dirty_sum.fetch_add(dirty.len() as u64, Ordering::Relaxed);
+            stats.inner.dirty_sum.fetch_add(VIDEO_CHUNKS as u64, Ordering::Relaxed);
             stats.inner.video_bytes.fetch_add(if ok { bytes } else { 0 }, Ordering::Relaxed);
             stats.inner.write_us_sum.fetch_add(us, Ordering::Relaxed);
             stats.inner.write_us_max.fetch_max(us, Ordering::Relaxed);
-            stats.inner.dirty_max.fetch_max(dirty.len() as u64, Ordering::Relaxed);
+            stats.inner.dirty_max.fetch_max(VIDEO_CHUNKS as u64, Ordering::Relaxed);
             let _ = return_tx.send(frm.bytes);
         }
     });
@@ -626,15 +613,15 @@ fn setup_scene(
 }
 
 // Readback fires when the requested texture copy completes; pack RGB565 into a
-// pooled buffer and hand it to the paced sender thread. Drop-if-behind: when
+// pooled buffer and hand it to the sender thread. Drop-if-behind: when
 fn on_video_readback(readback: On<ReadbackComplete>, mut video: ResMut<VideoTx>, stats: Res<LinkStats>) {
     stats.inner.readbacks.fetch_add(1, Ordering::Relaxed);
-    // Step 4 gate: at most 10 fps (100 ms since last accepted frame). Excess
-    // frames drop before the RGB565 pack — same pool return as the Full arm.
-    // The sender-thread chunk-0 heartbeat is untouched.
+    // Full-frame gate: at most ~1 fps (1000 ms since last accepted frame; one
+    // RLE'd frame is ~20-60 KB, fitting the UART budget). Excess frames drop
+    // before the RGB565 pack — same pool return as the Full arm.
     let now = Instant::now();
     if let Some(t) = video.last_accept {
-        if now.duration_since(t) < Duration::from_millis(100) {
+        if now.duration_since(t) < Duration::from_millis(1000) {
             stats.inner.dropped_full.fetch_add(1, Ordering::Relaxed);
             return;
         }
@@ -846,19 +833,5 @@ mod tests {
         assert_eq!(word(319, 0), 0x3807);
         assert_eq!(word(0, 239), 0x077D);
         assert_eq!(word(319, 239), 0x3F65);
-    }
-    #[test]
-    fn dirty_chunks_detects_single_and_spanning_changes() {
-        let base = vec![0x11u8; VIDEO_FRAME_BYTES];
-        assert!(dirty_chunks(&base, &base).is_empty());
-        let mut one = base.clone();
-        one[7 * VIDEO_PAYLOAD_MAX + 100] ^= 0xFF;
-        assert_eq!(dirty_chunks(&base, &one), vec![7]);
-        let mut span = base.clone();
-        span[3 * VIDEO_PAYLOAD_MAX + VIDEO_PAYLOAD_MAX - 1] ^= 0x01;
-        span[4 * VIDEO_PAYLOAD_MAX] ^= 0x01;
-        assert_eq!(dirty_chunks(&base, &span), vec![3, 4]);
-        let all = vec![0x22u8; VIDEO_FRAME_BYTES];
-        assert_eq!(dirty_chunks(&base, &all), (0..VIDEO_CHUNKS).collect::<Vec<_>>());
     }
 }

@@ -156,12 +156,13 @@ bool Tracker::report(uint32_t seq, const UsbWin &usb, const LoopWin &loop) {
   // reasons idle/budget/max + last drain count/exit. tReportMax/loopMax lag
   // one window (measured after this print). ~200 B @921600 ≈ 1.9 ms, absorbed
   // by the step scheduler (overrun threshold is 2 ticks = 4 ms).
-  Serial.printf("q %.4f %.4f %.4f %.4f seq %lu tick %lu over %lu gate %lu bg %.6f %.6f %.6f st %d ps %lu pd %lu rx %lu ch %lu dd %lu tf %u tv %u lr %u lm %u ex %lu/%lu/%lu n %u e %u\n",
+  Serial.printf("q %.4f %.4f %.4f %.4f seq %lu tick %lu over %lu gate %lu bg %.6f %.6f %.6f st %d ps %lu pd %lu rx %lu ch %lu dd %lu fd %lu tf %u tv %u lr %u lm %u ex %lu/%lu/%lu n %u e %u\n",
                 quat_[0], quat_[1], quat_[2], quat_[3], (unsigned long)seq,
                 (unsigned long)ticks_, (unsigned long)overruns_, (unsigned long)gated_,
                 bx, by, bz, still_.latched() ? 1 : 0,
                 (unsigned long)usb.sent, (unsigned long)usb.dropped, (unsigned long)usb.rxBytes,
                 (unsigned long)usb.chunks, (unsigned long)usb.decDrops,
+                (unsigned long)usb.frameDrops,
                 loop.tFusionMax, loop.tVideoMax, loop.tReportMax, loop.loopMax,
                 (unsigned long)loop.exitIdle, (unsigned long)loop.exitBudget,
                 (unsigned long)loop.exitMax, loop.lastN, loop.lastExit);

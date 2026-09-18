@@ -5,7 +5,7 @@
 #include "still_detect.h"
 
 struct UsbWin {
-  uint32_t sent = 0, dropped = 0, rxBytes = 0, chunks = 0, decDrops = 0;
+  uint32_t sent = 0, dropped = 0, rxBytes = 0, chunks = 0, decDrops = 0, frameDrops = 0;
 };
 struct LoopWin {
   unsigned tFusionMax = 0, tVideoMax = 0, loopMax = 0, tReportMax = 0;
