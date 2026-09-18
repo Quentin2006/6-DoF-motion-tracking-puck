@@ -31,9 +31,10 @@ public:
 
   // Throughput counters (Step 2 instrumentation): cumulative since boot,
   // deltas computed by the 1 Hz reporter.
-  // Frame-barrier note: device.ino drops chunks from a superseded frame so
-  // stale rows never paint over a newer frame; each such drop is counted.
-  void noteFrameDrop() { frameDrops_++; }
+  // Per-row newest-wins note: Display::chunkInner ignores chunks whose frame
+  // id is older than the row's last painted id, so stale rows never paint
+  // over a newer frame. Ignored-stale is not counted; frameDrops_ stays 0
+  // (fd field kept for 1 Hz report compat).
   uint32_t sent() const { return pktSeq_; }
   uint32_t dropped() const { return dropped_; }
   uint32_t rxBytes() const { return rxBytes_; }

@@ -6,11 +6,11 @@
 // Video wire contract: engine -> device 320x240 RGB565 frame fragments as
 // FRAME_VIDEO / FRAME_VIDEO_RLE frames (device/frame.h) over the single
 // USB-CDC port, landscape (90 deg CW from portrait 0).
-// Burst norm: the engine bursts only dirty 2-row chunks with no pacing (plus
-// a chunk-0 heartbeat on fully static frames); the device drains under a
-// per-tick time budget, so motion frames degrade via queue drops, never
-// fusion stalls. Unchanged rows keep prior pixels; a lost chunk self-heals
-// on the next dirty frame.
+// Paced full-frame norm: the engine paces ~120 chunks/s evenly across the
+// 1 s gate (no bursts); the device stores newest-wins per row in Display's
+// frame buffer and paints each row progressively as its chunks arrive.
+// Unchanged rows keep prior pixels; a lost chunk self-heals on the next
+// dirty frame for that row.
 constexpr int VIDEO_W = 320;
 constexpr int VIDEO_H = 240;
 constexpr size_t VIDEO_PAYLOAD_MAX = 1280;                          // 2 rows x 320 px x 2 B

@@ -315,8 +315,8 @@ struct LinkCounters {
 
 // Video sender queue to the puck panel over the same CDC port.
 // The render thread offers at most ~1 fps (1000 ms gate); the sender thread
-// bursts the full 120-chunk frame (idx 0..119 ascending, newest frame wins)
-// with no pacing — the UART baud is the limiter.
+// paces the full 120-chunk frame (idx 0..119 ascending, newest frame wins)
+// at ~5 ms per chunk — the device barrier drops bursts, so no burst.
 // frame_tx is 2-deep so the render thread never blocks
 #[derive(Resource)]
 struct VideoTx {
@@ -530,12 +530,28 @@ fn setup_scene(
                     let mut line_start = 0;
                     for i in 0..spill.len() {
                         if spill[i] == b'\n' {
-                            if let Ok(s) = std::str::from_utf8(&spill[line_start..i]) {
-                                let t = s.trim_end_matches('\r');
-                                if t.starts_with("q ")
-                                    && t.bytes().all(|b| (0x20..=0x7e).contains(&b))
-                                {
-                                    eprintln!("dev {t}");
+                            // Binary pose frames share the wire and contain
+                            // 0x0A, so a naive line_start..i segment is
+                            // usually [binary tail + "q ..."]. Anchor on the
+                            // last "q " in the segment and validate/print
+                            // only that tail.
+                            let seg = &spill[line_start..i];
+                            let mut mark: Option<usize> = None;
+                            let mut j = 0;
+                            while j + 1 < seg.len() {
+                                if seg[j] == b'q' && seg[j + 1] == b' ' {
+                                    mark = Some(j);
+                                }
+                                j += 1;
+                            }
+                            if let Some(pos) = mark {
+                                if let Ok(s) = std::str::from_utf8(&seg[pos..]) {
+                                    let t = s.trim_end_matches('\r');
+                                    if t.starts_with("q ")
+                                        && t.bytes().all(|b| (0x20..=0x7e).contains(&b))
+                                    {
+                                        eprintln!("dev {t}");
+                                    }
                                 }
                             }
                             line_start = i + 1;
@@ -566,33 +582,37 @@ fn setup_scene(
         }
     });
     commands.insert_resource(SerialLink { pose_rx });
-    // Burst sender thread: owns the cloned serial handle, sends the whole
+    // Paced sender thread: owns the cloned serial handle, sends the whole
     // 320x240 frame (all 120 2-row chunks, idx ascending) every gated frame.
-    // Fire-and-forget; write errors ignored. Returned buffers recycle
-    // through free_tx so the steady state allocates nothing.
+    // One write_all per chunk with ~5 ms pacing between chunks (not after the
+    // last), so ~120 small writes spread over ~0.6 s — no burst for the
+    // device barrier to drop. Fire-and-forget; write errors ignored.
+    // Returned buffers recycle through free_tx so the steady state allocates
+    // nothing.
     let (frame_tx, frame_rx) = sync_channel::<Frame>(2);
     let (free_tx, free_rx) = crossbeam_channel::unbounded::<Box<[u8]>>();
     let return_tx = free_tx.clone();
     thread::spawn(move || {
         let stats = sender_stats;
         let mut writer = writer;
-        // Reused burst buffer: 120 worst-case raw frames; grows never shrinks.
-        let mut burst = Vec::<u8>::new();
+        let mut scratch = [0u8; 7 + 8 + VIDEO_PAYLOAD_MAX];
         while let Ok(frm) = frame_rx.recv() {
             stats.inner.frames_sent.fetch_add(1, Ordering::Relaxed);
             let t0 = Instant::now();
-            burst.clear();
-            let mut scratch = [0u8; 7 + 8 + VIDEO_PAYLOAD_MAX];
+            let mut bytes: u64 = 0;
             for chunk in 0..VIDEO_CHUNKS {
                 let out = &frm.bytes[chunk * VIDEO_PAYLOAD_MAX..(chunk + 1) * VIDEO_PAYLOAD_MAX];
                 let n = encode_chunk(&mut scratch, frm.id, chunk, out);
-                burst.extend_from_slice(&scratch[..n]);
+                if writer.write_all(&scratch[..n]).is_ok() {
+                    bytes += n as u64;
+                }
+                if chunk + 1 < VIDEO_CHUNKS {
+                    thread::sleep(Duration::from_millis(5));
+                }
             }
-            let bytes = burst.len() as u64;
-            let ok = writer.write_all(&burst).is_ok();
             let us = t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
             stats.inner.dirty_sum.fetch_add(VIDEO_CHUNKS as u64, Ordering::Relaxed);
-            stats.inner.video_bytes.fetch_add(if ok { bytes } else { 0 }, Ordering::Relaxed);
+            stats.inner.video_bytes.fetch_add(bytes, Ordering::Relaxed);
             stats.inner.write_us_sum.fetch_add(us, Ordering::Relaxed);
             stats.inner.write_us_max.fetch_max(us, Ordering::Relaxed);
             stats.inner.dirty_max.fetch_max(VIDEO_CHUNKS as u64, Ordering::Relaxed);

@@ -39,24 +39,11 @@ void setup() {
 
 void loop() {
   const unsigned long loopT0 = micros();
-  // Step 2 window instrumentation: fusion/video/report spans + drain exit
   static uint32_t pSent = 0, pDrop = 0, pRx = 0, pCh = 0, pDec = 0, pFd = 0;
   static LoopWin win;
-  // Frame barrier: the engine bursts idx 0..119 ascending per frame with the
-  // frame id wrapping u16. Paint only the active frame — once a newer frame
-  // starts, rows from any older frame are stale and must never paint over
-  // it. Stale rows are counted, never silently lost. Adoption is by newer
-  // frame id (wrapping compare), never by idx 0: if idx 0 of a frame is lost
-  // to a CRC/stash reject, waiting for idx 0 would drop every later chunk of
-  // that frame forever and freeze the panel on a partial image. Adopting the
-  // first live chunk instead tears at most one frame. A restart streak (8
-  // consecutive drops of one id the wrap compare calls older) means the
-  // engine's ids restarted, so adopt it rather than stall for good.
-  static bool haveFrame = false;
-  static uint16_t activeFrame = 0;
-  static uint16_t dropFrame = 0;
-  static uint8_t dropStreak = 0;
-  constexpr uint8_t kAdoptStreak = 8;
+  // Per-row newest-wins lives in Display (rowFrame_ + frameBuf_): every
+  // live chunk blits, stale rows are ignored per-row, so there is no
+  // frame-level barrier here and no idx0 adoption stall is possible.
 
   const unsigned long tFuse0 = micros();
   const bool fresh = tracker.step();
@@ -88,35 +75,6 @@ void loop() {
     if (got <= 0) {
       idleExit = true;
       break;
-    }
-    if (!haveFrame || hdr.frame != activeFrame) {
-      // Newest-wins with u16 wrap: distance < 32768 means hdr.frame is newer.
-      // (A chunk of the active frame skips this block and paints.) A newer id
-      // adopts on any idx — waiting for idx 0 would freeze on a partial frame
-      // forever when idx 0 is lost — so a lost idx 0 tears at most one frame.
-      const bool newer = !haveFrame || (uint16_t)(hdr.frame - activeFrame) < 0x8000u;
-      bool adopt = newer;
-      if (!adopt) {
-        // Older id: stale row, unless the engine's ids restarted (then every
-        // new chunk reads "older" forever). Streak-adopt after 8 consecutive
-        // drops of one id rather than stall for good.
-        if (hdr.frame == dropFrame) {
-          ++dropStreak;
-        } else {
-          dropFrame = hdr.frame;
-          dropStreak = 1;
-        }
-        adopt = dropStreak >= kAdoptStreak;
-      }
-      if (!adopt) {
-        usbLink.noteFrameDrop();
-        continue;
-      }
-      activeFrame = hdr.frame;
-      haveFrame = true;
-      dropStreak = 0;
-    } else {
-      dropStreak = 0;
     }
     if (!open) {
       display.beginBurst();
