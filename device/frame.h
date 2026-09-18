@@ -33,15 +33,6 @@ inline uint16_t frame_crc_feed(uint16_t crc, uint8_t b) {
   return crc;
 }
 
-// CRC-16/CCITT-FALSE over `data[0..n)`.
-inline uint16_t frame_crc16(const uint8_t *data, size_t n) {
-  uint16_t crc = 0xFFFF;
-  for (size_t i = 0; i < n; i++) {
-    crc = frame_crc_feed(crc, data[i]);
-  }
-  return crc;
-}
-
 // Build one frame into `out` (must hold 7 + len bytes). Returns total bytes.
 inline size_t build_frame(uint8_t *out, uint8_t type, const uint8_t *payload, uint16_t len) {
   out[0] = FRAME_MAGIC_0;

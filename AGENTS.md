@@ -4,10 +4,11 @@
 
 A 6-DoF motion-tracking puck. An ESP32-S3 puck reads an MPU6050 IMU, fuses
 accelerometer + gyroscope into a 6-DoF orientation quaternion with a 6-state
-EKF, and streams the pose over UDP (~250 Hz) to a Rust/Bevy desktop engine.
-The engine binds a UDP socket, parses the packets, and drives a **look-around
-camera rig** — the puck's orientation maps directly to camera rotation, so the
-user moves the puck and the 3D view follows.
+EKF, and streams the pose as framed CDC-serial packets (~250 Hz) to a
+Rust/Bevy desktop engine. The engine opens the puck serial port, parses the
+frames, and drives a **look-around camera rig** — the puck's orientation maps
+directly to camera rotation, so the user moves the puck and the 3D view
+follows.
 
 Two independent halves, no shared code, wired together by a single root
 `Makefile` and hand-maintained constant agreement:
@@ -21,17 +22,17 @@ Two independent halves, no shared code, wired together by a single root
  MPU6050 (I2C SDA=5 SCL=4 @400kHz)
    │  readGyro() dps + readAccel() m/s²   (mpu6050.cpp: cal offset/scale + bias)
    ▼
- Tracker::step()  (tracker.cpp)
-   │  toBody(FUSION_AXIS_MAP) → body frame; body-accel norm
+ Tracker::step()  (src/position/tracker.cpp)
+   │  toBody swizzle → body frame; body-accel norm
    ├─ StillDetector::update(driver-frame gyro + norm) → Mpu6050.nudgeGyroBias (clamped 0.002 dps/tick)
    ├─ Ekf6Dof::predict(gyro rad/s) → Ekf6Dof::updateAccel(accel)  [gated → gated_++]
-   └─ wrap to display quat  q_disp = QW_ALIGN * q_ekf * QB_ALIGN   (right-multiply)
+   └─ wrap to display quat  (fixed ±90° X sandwich, right-multiply)
    ▼
- device.ino loop() → Net::sendQuat(quat, gyro)
-   │  36-byte packet: seq u32 | stamp u32 | quat xyzw f32 | gyro xyz f32  (all LE)
+ device.ino loop() → UsbLink::sendQuat(quat, gyro)
+   │  FRAME_POSE frame: magic 0x55 0xAA | type u8 | len u16 LE | 36 B payload | crc u16 LE
+   │  payload: seq u32 | stamp u32 | quat xyzw f32 | gyro xyz f32  (all LE)
    ▼
- engine/src/tracking.rs::update  (UDP 0.0.0.0:3333, drain-to-latest)
-   │  parse v2 (36 B) → predict forward (PREDICT_TAU_S) → slerp smooth (SMOOTH_TAU_S)
+ engine/src/tracking.rs::update  (serial /dev/ttyACM0 @921600, drain-to-latest)
    ▼
  LookRig camera Transform.rotation
 ```
@@ -40,7 +41,7 @@ Two independent halves, no shared code, wired together by a single root
 
 | File | Role |
 |---|---|
-| `device.ino` | Orchestrator: `setup()` init/calib, 10-line `loop()` (tick → send → video chunk → report → panel tick) |
+| `device.ino` | Orchestrator: `setup()` init/calib, `loop()` (tick → send → video drain → report → panel tick) |
 | `config.h` | Single source of all compile-time constants (pins, FSR, gravity, CDC framing, all EKF sigmas/gates, axis map, display pins) |
 | `src/position/tracker.{h,cpp}` | Pipeline glue + `micros()` scheduler + CAL6 accelerometer calibration + 1 Hz status line; owns `Mpu6050`, `Ekf6Dof`, `StillDetector` |
 | `src/position/mpu6050.{h,cpp}` | I2C driver + NVS accel-cal persistence (`Preferences`, namespace `mpu`, keys `ax0-2`/`as0-2`) |
@@ -48,28 +49,28 @@ Two independent halves, no shared code, wired together by a single root
 | `src/position/still_detect.{h,cpp}` | `StillDetector` — gyro re-bias while stationary (50-tick window, variance/norm gates) |
 | `link.{h,cpp}` | USB-CDC framed link (`Serial`): FRAME_POSE out, FRAME_VIDEO/FRAME_VIDEO_RLE in, pose/video counters |
 | `frame.h` | Framed CDC byte-stream contract (magic/type/len/CRC) — host-compilable, parsed by `link.cpp` and `engine/src/tracking.rs` |
-| `src/display/display.{h,cpp}` | ST7789 panel: per-row newest-wins framebuffer, chunk blit, idle RGB cycle |
+| `src/display/display.{h,cpp}` | ST7789 panel: chunk blit, burst transaction, idle RGB cycle |
 | `src/display/video.h` | Video wire contract: 320×240 RGB565 chunks + RLE decode — host-compilable, mirrored by `engine/src/tracking.rs` |
 | `packet.h` | Canonical 36 B pose payload + `build_quat_packet()` — host-compilable, single source of the byte contract |
-| `secrets.h` / `secrets.h.example` | WiFi credentials (`WIFI_SSID`, `WIFI_PASSWORD`, `ENGINE_IP`) |
 
 **Key module (`engine/`)**
 
 | File | Role |
 |---|---|
 | `src/main.rs` | `App::new().add_plugins(DefaultPlugins).add_plugins(TrackPlugin).run()` |
-| `src/tracking.rs` | All behavior: `Socket` resource, `LookRig` marker, `TrackPlugin`, `update` ECS system |
+| `src/tracking.rs` | All behavior: `SerialLink`/`VideoTx` resources, `LookRig` marker, `TrackPlugin`, `update` ECS system, serial reader + video sender threads |
 
-**Cross-file wire contract (edit both halves together).** `device/config.h` and
-`engine/src/tracking.rs` hard-code the same UDP protocol by hand; there is no
-shared crate or serializer. `UDP_PORT = 3333` and the 36-byte packet size
-**must match in both files**. `config.h` even notes "must match
-engine/src/tracking.rs UDP_PORT". Both x86 and ESP32 are little-endian, so no
+**Cross-file wire contract (edit both halves together).** `device/frame.h`,
+`device/packet.h`, `device/src/display/video.h` and `engine/src/tracking.rs`
+hard-code the same framed-CDC protocol by hand; there is no shared crate or
+serializer. The 36-byte pose payload (`QUAT_PACKET_LEN_V2`) inside a
+`FRAME_POSE` frame, and the 320×240 RGB565 video chunks (`VIDEO_*` + RLE),
+**must match in both halves**. Both x86 and ESP32 are little-endian, so no
 byte-swapping is done.
 
 The packet byte layout is **canonical in `device/packet.h`**
-(`build_quat_packet`, host-compilable, no Arduino deps); `net.cpp` calls it and
-names `QUAT_PACKET_LEN_V2` directly. The committed `tests/packet_fixture.txt`
+(`build_quat_packet`, host-compilable, no Arduino deps); `link.cpp`
+(`UsbLink::sendQuat`) calls it and names `QUAT_PACKET_LEN_V2` directly. The committed `tests/packet_fixture.txt`
 is the single source of truth and is asserted by **both** halves — the C++ host
 test (`tests/packet_test.cpp`, producer) and the Rust parser test
 (`tracking.rs`, consumer). Changing the packet layout means updating
@@ -95,7 +96,7 @@ is editor IntelliSense only — it does not compile or flash.
 ```bash
 make compile          # build firmware only: arduino-cli compile --fqbn esp32:esp32:esp32s3 device
 make upload           # flash to /dev/ttyACM0: arduino-cli upload --fqbn $(FQBN) -p /dev/ttyACM0 device
-make monitor          # serial monitor @115200 (uses device/sketch.yaml port/baud)
+make monitor          # serial monitor @921600 (uses device/sketch.yaml port/baud)
 make device           # compile + upload + monitor  (interactive loop)
 make engine           # cd engine && cargo run      (host Bevy visualizer)
 make all              # compile + upload + engine   (full pipeline)
@@ -104,44 +105,40 @@ make lsp              # regenerate + rewrite compile_commands.json for clangd
 make test             # cargo test (engine) + host packet-contract test (device/packet.h vs tests/packet_fixture.txt)
 ```
 
-- **FQBN** default `esp32:esp32:esp32s3` (in `Makefile` `?=` and `device/sketch.yaml`); override with `make compile FQBN=<other>`.
-- **Port** `/dev/ttyACM0`, **baud** 115200.
+- **FQBN** default `esp32:esp32:esp32s3:CDCOnBoot=cdc` (in `Makefile` `?=` and `device/sketch.yaml`); override with `make compile FQBN=<other>`.
+- **Port** `/dev/ttyACM0`, **baud** 921600 (native-CDC baud is don't-care; `PUCK_SERIAL` env overrides the port).
 - `make engine` from repo root, or `cargo run` from `engine/`.
 - `make lsp` = compile with `--only-compilation-database --build-path ./build`, then a `jq` rewrite that maps `build/sketch/` → `device/`, renames `.ino.cpp` → `.ino`, injects `-x c++` on `.ino` files, and strips `-MMD`/`-o`/object args. The `.clangd` compiler/sysroot override handles toolchain include discovery.
 
 ## Code Conventions & Common Patterns
 
 **C++ (device/)**
-- `#pragma once` (never include guards); lowercase `.h`/`.cpp` (except `device.ino`).
-- Classes `PascalCase` (`Tracker`, `Ekf6Dof`, `Mpu6050`, `StillDetector`, `Net`, `Display`); methods/members `camelCase`; private members trailing `_` (`quat_`, `pktSeq_`, `lastTickUs_`).
+- Classes `PascalCase` (`Tracker`, `Ekf6Dof`, `Mpu6050`, `StillDetector`, `UsbLink`, `Display`); methods/members `camelCase`; private members trailing `_` (`quat_`, `pktSeq_`, `lastTickUs_`).
 - Constants: `UPPER_SNAKE` for macros/constexpr (`SDA_PIN`, `FUSION_RATE_HZ`, `EKF_GATE_MAHA`); `k`-prefixed class-private `static constexpr` (`kWinTicks`, `kAlpha`).
-- 2-space indent; braces same line; space inside parens `if (cond)`. Avoid C-style casts.
-- **Error handling:** deterministic fail-stop — `setup()` hangs in `while(true) delay()` if MPU init or WiFi fails; no soft degradation. NVS accel-cal is fault-tolerant (missing → identity defaults, silent no-op). CAL6 is abort-safe (only the SAVE writes NVS). NaN treated as failure via `!(x < th)` / `== 0` guards.
+- **Error handling:** deterministic fail-stop — `setup()` hangs in `while(true) delay()` if MPU init fails; no soft degradation. NVS accel-cal is fault-tolerant (missing → identity defaults, silent no-op). CAL6 is abort-safe (only the SAVE writes NVS). NaN treated as failure via `!(x < th)` / `== 0` guards.
 - **Filter tuning:** EKF sigmas/gates live in `config.h`; comments say to tune constants rather than touch the filter code.
 - `config.h` display pins are **FIXED** (`TFT_MOSI=11 TFT_SCLK=12 TFT_CS=10 TFT_DC=9 TFT_RST=8`) with extensive comments on hardware traps — do not move them. `TFT_BL=7` is driven HIGH once in `Display::begin()` (backlight on).
 
-**Rust (engine/)**
-- Minimal crate: no `lib.rs`, no modules beyond `tracking`, no async, no serde — just Bevy + `std::net::UdpSocket`.
+- Minimal crate: no `lib.rs`, no modules beyond `tracking`, no async, no serde — just Bevy + `crossbeam-channel` + `serialport`.
 - Bevy idioms: `#[derive(Resource)]` / `#[derive(Component)]`, `Plugin` trait, function-based `app.add_systems(Startup/Update, ...)`, `Single<&mut Transform, With<LookRig>>`, `Local<T>` for per-frame scratch.
-- Crash-fast errors: `unwrap_or_else(|e| panic!(...))` on bind, `expect()` on nonblocking, `match { _ => {} }` to drop malformed packets. No `Result` ergonomics / `thiserror` / `anyhow`.
+- Crash-fast errors: `unwrap_or_else(|e| panic!(...))` on serial open/clone; reader thread drops malformed frames, pose queue oldest-drops when full. No `Result` ergonomics / `thiserror` / `anyhow`.
 - Explicit little-endian parsing (`f32::from_le_bytes`, `u32::from_le_bytes`), `#[inline]` micro-helpers.
 - Comments are terse, explain *why* (e.g. drain-to-latest is not packet loss at ~4 packets/frame).
 
 ## Important Files
 
 - `device/config.h` — every compile-time constant and the wire-contract sizes. The file any hardware/fusion change lands in.
-- `device/packet.h` — canonical UDP packet layout + `build_quat_packet()`; the byte contract's single source (host-testable).
+- `device/packet.h` — canonical 36 B pose payload + `build_quat_packet()`; the byte contract's single source (host-testable).
+- `device/frame.h` — framed-CDC contract (magic/type/len/CRC + `FrameParser`); parsed by `link.cpp` and the engine reader.
 - `device/device.ino` — the boot + loop sequencing (init → calib → CAL6 gate → start → stream).
-- `device/tracker.cpp` — the per-tick pipeline (scheduler, axis remap, still-detect nudge, EKF predict/update, display-quat wrap).
-- `engine/src/tracking.rs` — the packet parser, prediction/smoothing, and camera rig.
+- `device/src/position/tracker.cpp` — the per-tick pipeline (scheduler, axis remap, still-detect nudge, EKF predict/update, display-quat wrap).
+- `engine/src/tracking.rs` — the packet parser, prediction/smoothing, video sender, and camera rig.
 - `Makefile` — the whole build/dev entry surface.
-- `device/secrets.h.example` — template to create your local `device/secrets.h`.
 
 ## Runtime / Tooling Preferences
 
 - **Device toolchain:** `arduino-cli` with ESP32 core (had `3.3.11` at `~/.arduino15/packages/esp32/hardware/esp32/`), xtensa toolchain `esp-x32/2601`. Not PlatformIO.
-- **Engine toolchain:** Rust `edition 2024`, `cargo`; `[profile.dev] opt-level = 1`, `[profile.dev.package."*"] opt-level = 3`.
-- **Secrets:** `device/secrets.h` is **gitignored and must never be committed**; `config.h` includes it unconditionally, so a build without a populated `secrets.h` fails deliberately. Create it from `secrets.h.example`. It currently holds real credentials in the working tree (SSID/password/`ENGINE_IP`) — never print or commit them.
+- **Secrets:** `device/secrets.h` is **gitignored and unused by the firmware** (no includer; transport is USB-CDC, no WiFi). If it exists locally, never commit it.
 - **`compile_commands.json` is generated** (`make lsp`); never hand-edit it. Regenerate after changing a sketch source or arduino-cli options — it is what makes clangd handle `.ino` files (via injected `-x c++`).
 - `RFC 2119`-style MUSTs above follow from these facts.
 
@@ -176,8 +173,8 @@ each) and merged sequentially — never batch unrelated changes. The device↔en
 wire contract is the one thing that can break silently: if either half changes
 the packet format, `make test` is the gate.
 
-**Secrets stay local.** `device/secrets.h` is never committed; CI and local
-builds generate it from `secrets.h.example` when a compile needs it.
+**Secrets stay local.** `device/secrets.h` is gitignored and unused (no WiFi
+transport); never commit it if it exists locally.
 
 ## Testing & QA
 
@@ -187,18 +184,18 @@ verification stays manual.
 
 - **`make test`** runs both halves against the same committed fixture:
   1. **Engine parser test** (`engine/src/tracking.rs`, `#[cfg(test)]`) — decode
-     `tests/packet_fixture.txt` and assert `parse_v2` recovers the logical values
+     `tests/packet_fixture.txt` and assert `parse_pose` recovers the logical values
      (consumer half).
   2. **C++ producer test** (`tests/packet_test.cpp`, host `g++`) — build a v2
      packet with `build_quat_packet` and assert the bytes equal the same fixture
-     (producer half).
+     (producer half). A framing test (`tests/frame_test.cpp`) covers garbage
+     recovery, CRC rejection, split reassembly, and magic-in-payload.
   Both read the **same** `tests/packet_fixture.txt`, so a one-sided layout change
   fails its own test. Needs a host `g++` (not required to flash firmware).
 
 - **CI (`.github/workflows/ci.yml`)** runs `cargo test` on the engine and
-  `arduino-cli compile --fqbn esp32:esp32:esp32s3 device` on the firmware. The
-  device job copies `device/secrets.h.example` → `device/secrets.h` first
-  (config.h includes it unconditionally); real secrets are never committed.
+  `arduino-cli compile --fqbn esp32:esp32:esp32s3 device` on the firmware. No
+  secrets step: the firmware compiles without `device/secrets.h`.
 
 **Still manual / no automation:**
 - **Compile gate** locally: `make compile` — keep green after any `device/` change.
@@ -206,8 +203,8 @@ verification stays manual.
   CAL6 procedure (`Tracker::maybeRunAccelCal` / `runAccelCal` in `src/position/tracker.cpp`)
   calibrates the accelerometer (6 poses); `src/position/still_detect.cpp` re-biases
   gyro while still. The onboard LED goes red→green once streaming; the 1 Hz
-  `q`/`seq`/`tick`/`over`/`gate`/`bg`/`st` line comes from `Tracker::report`.
-- **Host render:** `make engine` binds UDP `0.0.0.0:3333` and renders the rig.
+- **Host render:** `make engine` opens the puck serial port (`PUCK_SERIAL` or
+  `/dev/ttyACM0` @921600) and renders the rig.
 
 There is **no** unit coverage for `Ekf6Dof`, `StillDetector`, or `Mpu6050` — they
 are hardware-coupled and the serial/calibration path is their real test. Add a

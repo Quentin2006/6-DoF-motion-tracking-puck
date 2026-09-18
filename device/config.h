@@ -40,6 +40,11 @@ constexpr int TFT_W = 240;
 constexpr int TFT_H = 320;
 constexpr uint32_t TFT_SPI_FREQ = 62500000; // 62.5 MHz: ST7789VW §7.4.3 Table 6 TSCYCW min 16 ns write cycle; fallback 40 MHz on any tear
 constexpr unsigned long DISPLAY_COLOR_PERIOD_MS = 5000; // solid RGB cycle step
+constexpr unsigned long VIDEO_IDLE_MS = 10000; // RGB cycle takes over after this long with no chunks
+// Budgeted video drain: max 16 chunks under 1200 us inside one SPI
+// transaction; fusion + ~0.35 ms I2C must still fit the 2000 us tick.
+constexpr int VIDEO_DRAIN_MAX_CHUNKS = 16;
+constexpr unsigned long VIDEO_DRAIN_BUDGET_US = 1200;
 
 // ------------------------------- STATUS LED -------------------------------
 // Onboard WS2812 addressable RGB (GPIO48 on the stock S3 devkit). Driven via

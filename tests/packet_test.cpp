@@ -26,7 +26,7 @@ static std::string fixture_hex(const std::string &path) {
   while (std::getline(in, line)) {
     std::string t;
     for (char c : line)
-      if (c != ' ' && c != '\t' && c != '\r') t += (char)tolower((unsigned char)c);
+      if (!isspace((unsigned char)c)) t += (char)tolower((unsigned char)c);
     if (t.empty() || t[0] == '#') continue;
     return t;
   }
@@ -41,16 +41,6 @@ static std::vector<uint8_t> hex_bytes(const std::string &s) {
     out.push_back((uint8_t)((hi << 4) | lo));
   }
   return out;
-}
-
-static std::string bytes_hex(const std::vector<uint8_t> &v) {
-  static const char *digits = "0123456789abcdef";
-  std::string s;
-  for (uint8_t b : v) {
-    s += digits[b >> 4];
-    s += digits[b & 0xf];
-  }
-  return s;
 }
 
 int main(int argc, char **argv) {
@@ -72,10 +62,10 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  std::string got = bytes_hex(std::vector<uint8_t>(pkt, pkt + n));
-  if (got != hex) {
-    std::fprintf(stderr, "packet_test: MISMATCH\n  fixture: %s\n  built:   %s\n",
-                 hex.c_str(), got.c_str());
+  const std::vector<uint8_t> want = hex_bytes(hex);
+  const std::vector<uint8_t> got(pkt, pkt + n);
+  if (got != want) {
+    std::fprintf(stderr, "packet_test: MISMATCH (%zu bytes)\n", n);
     return 1;
   }
 

@@ -126,25 +126,12 @@ int main() {
     uint8_t type = 0;
     uint16_t len = 0;
     std::vector<uint8_t> out;
-    std::vector<uint8_t> last;
-    uint8_t lastType = 0;
-    uint16_t lastLen = 0;
-    static uint8_t scratch[FRAME_MAX_PAYLOAD];
-    int got = 0;
-    for (uint8_t b : stream) {
-      if (fp.push(b, type, scratch, len)) {
-        got++;
-        lastType = type;
-        lastLen = len;
-        last.assign(scratch, scratch + len);
-      }
-    }
+    int got = feed(fp, stream.data(), stream.size(), type, out, len);
     CHECK(got == 2, "two back-to-back frames with magic in payload");
-    CHECK(lastType == FRAME_POSE && lastLen == QUAT_PACKET_LEN_V2, "second frame header");
-    CHECK(last.size() == QUAT_PACKET_LEN_V2 &&
-              memcmp(last.data(), payload, QUAT_PACKET_LEN_V2) == 0,
+    CHECK(type == FRAME_POSE && len == QUAT_PACKET_LEN_V2, "second frame header");
+    CHECK(out.size() == QUAT_PACKET_LEN_V2 &&
+              memcmp(out.data(), payload, QUAT_PACKET_LEN_V2) == 0,
           "second frame payload");
-    (void)out;
   }
 
   if (failures == 0) {
