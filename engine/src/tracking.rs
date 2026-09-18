@@ -584,10 +584,10 @@ fn setup_scene(
     commands.insert_resource(SerialLink { pose_rx });
     // Sender thread: owns the cloned serial handle, sends the whole
     // 320x240 frame (all 120 2-row chunks, idx ascending) every gated frame.
-    // One write_all per chunk back-to-back (~10 fps on native CDC) — the
-    // device per-row newest-wins buffer absorbs pacing. Fire-and-forget;
-    // write errors ignored. Returned buffers recycle through free_tx so the
-    // steady state allocates nothing.
+    // One write_all per chunk back-to-back (~30 fps on native CDC, SPI panel
+    // write is the ceiling) — the device per-row newest-wins buffer absorbs
+    // pacing. Fire-and-forget; write errors ignored. Returned buffers recycle
+    // through free_tx so the steady state allocates nothing.
     let (frame_tx, frame_rx) = sync_channel::<Frame>(2);
     let (free_tx, free_rx) = crossbeam_channel::unbounded::<Box<[u8]>>();
     let return_tx = free_tx.clone();
@@ -631,17 +631,17 @@ fn setup_scene(
 // pooled buffer and hand it to the sender thread. Drop-if-behind: when
 fn on_video_readback(readback: On<ReadbackComplete>, mut video: ResMut<VideoTx>, stats: Res<LinkStats>) {
     stats.inner.readbacks.fetch_add(1, Ordering::Relaxed);
-    // Full-frame gate: at most ~10 fps (100 ms since last accepted frame;
-    // native CDC has no UART budget, device drains ~8000 chunks/s). Excess
-    // frames drop before the RGB565 pack — same pool return as the Full arm.
+    // Full-frame gate: at most ~30 fps (33 ms since last accepted frame;
+    // SPI panel write is the ceiling at ~25-30 ms/frame, native CDC and the
+    // ~8000 chunks/s drain budget both have headroom). Excess frames drop
+    // before the RGB565 pack — same pool return as the Full arm.
     let now = Instant::now();
     if let Some(t) = video.last_accept {
-        if now.duration_since(t) < Duration::from_millis(100) {
+        if now.duration_since(t) < Duration::from_millis(33) {
             stats.inner.dropped_full.fetch_add(1, Ordering::Relaxed);
             return;
         }
     }
-    video.last_accept = Some(now);
     let data = &readback.data;
     // Tight-pack invariant: 320*4 = 1280 is a multiple of the 256-byte row
     // alignment, so the readback is exactly 307200 bytes with no stride
