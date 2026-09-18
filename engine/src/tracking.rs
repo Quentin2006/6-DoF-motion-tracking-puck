@@ -582,13 +582,12 @@ fn setup_scene(
         }
     });
     commands.insert_resource(SerialLink { pose_rx });
-    // Paced sender thread: owns the cloned serial handle, sends the whole
+    // Sender thread: owns the cloned serial handle, sends the whole
     // 320x240 frame (all 120 2-row chunks, idx ascending) every gated frame.
-    // One write_all per chunk with ~5 ms pacing between chunks (not after the
-    // last), so ~120 small writes spread over ~0.6 s — no burst for the
-    // device barrier to drop. Fire-and-forget; write errors ignored.
-    // Returned buffers recycle through free_tx so the steady state allocates
-    // nothing.
+    // One write_all per chunk back-to-back (~10 fps on native CDC) — the
+    // device per-row newest-wins buffer absorbs pacing. Fire-and-forget;
+    // write errors ignored. Returned buffers recycle through free_tx so the
+    // steady state allocates nothing.
     let (frame_tx, frame_rx) = sync_channel::<Frame>(2);
     let (free_tx, free_rx) = crossbeam_channel::unbounded::<Box<[u8]>>();
     let return_tx = free_tx.clone();
@@ -606,16 +605,12 @@ fn setup_scene(
                 if writer.write_all(&scratch[..n]).is_ok() {
                     bytes += n as u64;
                 }
-                if chunk + 1 < VIDEO_CHUNKS {
-                    thread::sleep(Duration::from_millis(5));
-                }
             }
             let us = t0.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
             stats.inner.dirty_sum.fetch_add(VIDEO_CHUNKS as u64, Ordering::Relaxed);
             stats.inner.video_bytes.fetch_add(bytes, Ordering::Relaxed);
             stats.inner.write_us_sum.fetch_add(us, Ordering::Relaxed);
             stats.inner.write_us_max.fetch_max(us, Ordering::Relaxed);
-            stats.inner.dirty_max.fetch_max(VIDEO_CHUNKS as u64, Ordering::Relaxed);
             let _ = return_tx.send(frm.bytes);
         }
     });
@@ -636,12 +631,12 @@ fn setup_scene(
 // pooled buffer and hand it to the sender thread. Drop-if-behind: when
 fn on_video_readback(readback: On<ReadbackComplete>, mut video: ResMut<VideoTx>, stats: Res<LinkStats>) {
     stats.inner.readbacks.fetch_add(1, Ordering::Relaxed);
-    // Full-frame gate: at most ~1 fps (1000 ms since last accepted frame; one
-    // RLE'd frame is ~20-60 KB, fitting the UART budget). Excess frames drop
-    // before the RGB565 pack — same pool return as the Full arm.
+    // Full-frame gate: at most ~10 fps (100 ms since last accepted frame;
+    // native CDC has no UART budget, device drains ~8000 chunks/s). Excess
+    // frames drop before the RGB565 pack — same pool return as the Full arm.
     let now = Instant::now();
     if let Some(t) = video.last_accept {
-        if now.duration_since(t) < Duration::from_millis(1000) {
+        if now.duration_since(t) < Duration::from_millis(100) {
             stats.inner.dropped_full.fetch_add(1, Ordering::Relaxed);
             return;
         }
