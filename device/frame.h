@@ -19,6 +19,7 @@ constexpr uint8_t FRAME_POSE = 0x01;
 constexpr uint8_t FRAME_VIDEO = 0x02;
 // Same 8-byte video header + chunk bytes as FRAME_VIDEO, but the chunk bytes
 // are RLE-compressed (see rle_decode_565 in device/src/display/video.h); hdr.len is the
+// compressed length. Sent when the encoding is strictly smaller than raw.
 constexpr uint8_t FRAME_VIDEO_RLE = 0x03;
 constexpr size_t FRAME_MAX_PAYLOAD = 1288; // largest video payload (8 + 1280)
 constexpr size_t FRAME_HDR_LEN = 5;        // magic[2] + type + len[2]
