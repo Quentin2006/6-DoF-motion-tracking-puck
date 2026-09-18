@@ -28,6 +28,7 @@ public:
 
   uint32_t sequence() const { return pktSeq_; }
 
+private:
   FrameParser parser_;
   uint32_t pktSeq_ = 0;
   bool sendNow_ = true;

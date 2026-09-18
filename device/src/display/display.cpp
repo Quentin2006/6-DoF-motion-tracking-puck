@@ -30,8 +30,9 @@ void Display::chunkInner(const VideoChunkHdr &hdr, const uint16_t *px, int len) 
 }
 
 void Display::tick(unsigned long now) {
-  const bool videoIdle = lastChunkMs_ == 0 || (unsigned long)(now - lastChunkMs_) > 10000UL;
-  if (!videoIdle || (unsigned long)(now - lastColorMs_) < DISPLAY_COLOR_PERIOD_MS) {
+  const bool videoIdle = lastChunkMs_ == 0 || (unsigned long)(now - lastChunkMs_) > VIDEO_IDLE_MS;
+  const bool due = (unsigned long)(now - lastColorMs_) >= DISPLAY_COLOR_PERIOD_MS;
+  if (!videoIdle || !due) {
     return;
   }
   lastColorMs_ = now;

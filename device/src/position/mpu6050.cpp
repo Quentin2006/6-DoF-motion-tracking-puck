@@ -107,6 +107,10 @@ bool Mpu6050::getGyroBias() {
   return meanBurst(kGyroBase, GYRO_LSB_TO_DPS, gyro_bias);
 }
 
+bool Mpu6050::meanRawAccel(vec3 &out) {
+  return meanBurst(kAccelBase, ACCEL_LSB_O_MPS2, out);
+}
+
 bool Mpu6050::getAccelBias() {
   vec3 m;
   if (!meanBurst(kAccelBase, ACCEL_LSB_O_MPS2, m)) {
@@ -177,30 +181,30 @@ void Mpu6050::getAccelCal(float off[3], float scale[3]) const {
 }
 
 void Mpu6050::loadAccelCal() {
+  static const char *kOff[3] = {"ax0", "ax1", "ax2"};
+  static const char *kScale[3] = {"as0", "as1", "as2"};
   Preferences prefs;
   if (!prefs.begin("mpu", true)) {
     return; // NVS unavailable: keep identity defaults
   }
-  accOff_[0] = prefs.getFloat("ax0", 0.0f);
-  accOff_[1] = prefs.getFloat("ax1", 0.0f);
-  accOff_[2] = prefs.getFloat("ax2", 0.0f);
-  accScale_[0] = prefs.getFloat("as0", 1.0f);
-  accScale_[1] = prefs.getFloat("as1", 1.0f);
-  accScale_[2] = prefs.getFloat("as2", 1.0f);
+  for (int i = 0; i < 3; ++i) {
+    accOff_[i] = prefs.getFloat(kOff[i], 0.0f);
+    accScale_[i] = prefs.getFloat(kScale[i], 1.0f);
+  }
   prefs.end();
 }
 
 void Mpu6050::saveAccelCal() const {
+  static const char *kOff[3] = {"ax0", "ax1", "ax2"};
+  static const char *kScale[3] = {"as0", "as1", "as2"};
   Preferences prefs;
   if (!prefs.begin("mpu", false)) {
     return;
   }
-  prefs.putFloat("ax0", accOff_[0]);
-  prefs.putFloat("ax1", accOff_[1]);
-  prefs.putFloat("ax2", accOff_[2]);
-  prefs.putFloat("as0", accScale_[0]);
-  prefs.putFloat("as1", accScale_[1]);
-  prefs.putFloat("as2", accScale_[2]);
+  for (int i = 0; i < 3; ++i) {
+    prefs.putFloat(kOff[i], accOff_[i]);
+    prefs.putFloat(kScale[i], accScale_[i]);
+  }
   prefs.end();
 }
 
@@ -208,10 +212,10 @@ void Mpu6050::saveAccelCal() const {
 // yank the bias.
 void Mpu6050::nudgeGyroBias(const vec3 &meanDps, float alpha) {
   constexpr float kMaxStepDps = 0.002f;
-  const float sx = alpha * meanDps.x;
-  const float sy = alpha * meanDps.y;
-  const float sz = alpha * meanDps.z;
-  gyro_bias.x += sx > kMaxStepDps ? kMaxStepDps : (sx < -kMaxStepDps ? -kMaxStepDps : sx);
-  gyro_bias.y += sy > kMaxStepDps ? kMaxStepDps : (sy < -kMaxStepDps ? -kMaxStepDps : sy);
-  gyro_bias.z += sz > kMaxStepDps ? kMaxStepDps : (sz < -kMaxStepDps ? -kMaxStepDps : sz);
+  float *bias[3] = {&gyro_bias.x, &gyro_bias.y, &gyro_bias.z};
+  const float step[3] = {alpha * meanDps.x, alpha * meanDps.y, alpha * meanDps.z};
+  for (int i = 0; i < 3; ++i) {
+    const float s = step[i] > kMaxStepDps ? kMaxStepDps : (step[i] < -kMaxStepDps ? -kMaxStepDps : step[i]);
+    *bias[i] += s;
+  }
 }

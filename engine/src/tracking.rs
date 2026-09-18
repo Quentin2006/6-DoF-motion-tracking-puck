@@ -57,19 +57,14 @@ fn rle_encode_565(chunk: &[u8]) -> Vec<u8> {
             while j + r < words && r < 128 && word(j + r) == w {
                 r += 1;
             }
-            if r >= 3 && lit > 0 {
-                break;
-            }
+            // A 3+ run ahead ends the literal (emitted as a run next turn).
             if r >= 3 {
-                // A 3+ run starts immediately: emit as run, not literal.
                 break;
             }
             lit += 1;
         }
-        // Degenerate: single word before a run — emit as 1-literal.
-        if lit == 0 {
-            lit = 1;
-        }
+        // Here lit >= 1: run < 3 above guarantees progress. (A 3+ run at i
+        // breaks with lit == 0 only when the outer run>=3 already continued.)
         out.push((lit % 128) as u8);
         for k in 0..lit {
             let w = word(start + k);
@@ -330,10 +325,7 @@ fn update(
 ) {
     // Drain to latest: only the newest pose is displayed, so everything but
     // the last queued pose is decoded-and-dropped.
-    let mut latest: Option<Pose> = None;
-    for pose in link.pose_rx.try_iter() {
-        latest = Some(pose);
-    }
+    let latest: Option<Pose> = link.pose_rx.try_iter().last();
     // Readback capture: one persistent Readback entity lives for the whole
     // run (spawned once in setup_scene). It fires every frame on its own;
     // nothing is spawned or despawned per tick, so no entity churn.
@@ -480,10 +472,18 @@ fn setup_scene(
     commands.spawn(Readback::texture(target));
 }
 
+// Pack RGBA8 bytes into RGB565 LE words. One frame = 120 chunks x 1280 B
+// from 307200 RGBA8 bytes.
+fn pack_rgb565(dst: &mut [u8], src: &[u8]) {
+    for (d, px) in dst.chunks_exact_mut(2).zip(src.chunks_exact(4)) {
+        let v: u16 = ((px[0] as u16 >> 3) << 11) | ((px[1] as u16 >> 2) << 5) | (px[2] as u16 >> 3);
+        d.copy_from_slice(&v.to_le_bytes());
+    }
+}
+
 // Readback fires when the requested texture copy completes; pack RGB565 into a
 // pooled buffer and hand it to the paced sender thread. Drop-if-behind: when
 // the 2-deep queue is full the frame is returned to the pool instead of
-// blocking the render thread.
 fn on_video_readback(readback: On<ReadbackComplete>, mut video: ResMut<VideoTx>) {
     let data = &readback.data;
     // Tight-pack invariant: 320*4 = 1280 is a multiple of the 256-byte row
@@ -499,22 +499,15 @@ fn on_video_readback(readback: On<ReadbackComplete>, mut video: ResMut<VideoTx>)
         .try_recv()
         .unwrap_or_else(|_| vec![0u8; VIDEO_FRAME_BYTES].into_boxed_slice());
     // One frame = 120 chunks x 1280 RGB565 bytes from 307200 RGBA8 bytes.
-    for (dst, px) in buf
-        .chunks_exact_mut(2)
-        .zip(data[..VIDEO_W * 4 * VIDEO_H].chunks_exact(4))
-    {
-        let v: u16 = ((px[0] as u16 >> 3) << 11) | ((px[1] as u16 >> 2) << 5) | (px[2] as u16 >> 3);
-        dst.copy_from_slice(&v.to_le_bytes());
-    }
+    pack_rgb565(&mut buf, &data[..VIDEO_W * 4 * VIDEO_H]);
     let frame = video.frame_id;
     video.frame_id = frame.wrapping_add(1);
     match video.frame_tx.try_send(Frame { bytes: buf, id: frame }) {
         Ok(()) => {}
-        Err(std::sync::mpsc::TrySendError::Full(frm)) => {
-            // Sender behind: return the frame buffer to the pool instead of blocking.
-            let _ = video.free_tx.send(frm.bytes);
-        }
-        Err(std::sync::mpsc::TrySendError::Disconnected(frm)) => {
+        // Sender behind or gone: return the frame buffer to the pool instead
+        // of blocking the render thread.
+        Err(std::sync::mpsc::TrySendError::Full(frm))
+        | Err(std::sync::mpsc::TrySendError::Disconnected(frm)) => {
             let _ = video.free_tx.send(frm.bytes);
         }
     }
@@ -658,8 +651,8 @@ mod tests {
 
     #[test]
     fn pack_ppm_gradient_roundtrip() {
-        // Synthetic 320x240 RGBA8 gradient through the exact pack expression
-        // in on_video_readback; pins the RGB565 LE words at four corners.
+        // Synthetic 320x240 RGBA8 gradient through pack_rgb565; pins the
+        // RGB565 LE words at four corners.
         let mut rgba = vec![0u8; VIDEO_W * 4 * VIDEO_H];
         for y in 0..VIDEO_H {
             for x in 0..VIDEO_W {
@@ -671,14 +664,7 @@ mod tests {
             }
         }
         let mut out = vec![0u8; VIDEO_FRAME_BYTES];
-        for (dst, px) in out
-            .chunks_exact_mut(2)
-            .zip(rgba[..VIDEO_W * 4 * VIDEO_H].chunks_exact(4))
-        {
-            let v: u16 =
-                ((px[0] as u16 >> 3) << 11) | ((px[1] as u16 >> 2) << 5) | (px[2] as u16 >> 3);
-            dst.copy_from_slice(&v.to_le_bytes());
-        }
+        pack_rgb565(&mut out, &rgba[..VIDEO_W * 4 * VIDEO_H]);
         assert_eq!(out.len(), VIDEO_FRAME_BYTES);
         let word = |x: usize, y: usize| {
             let o = (y * VIDEO_W + x) * 2;

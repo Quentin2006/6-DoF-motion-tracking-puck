@@ -16,6 +16,7 @@ public:
   bool readGyro(vec3 &out);     // dps, bias-corrected, NO dt scaling
   bool readAccel(vec3 &out);    // m/s², factory-cal + bias-corrected, NO dt scaling
   bool readRawAccel(vec3 &out); // m/s², all cal bypassed; CAL6-only
+  bool meanRawAccel(vec3 &out); // ~200-sample raw mean for one CAL6 pose
 
   bool getGyroBias();  // GYRO_CALIB_SAMPLES-burst mean; false if no sample
   bool getAccelBias(); // ditto, gravity removed along the measured direction

@@ -7,22 +7,21 @@ class StillDetector {
 public:
   // Returns true if a bias nudge is warranted this tick (latched and still, or
   // just entered still). On a nudge-return, caller should call meanDps() and
-  // nudgeGyroBias(mean, alpha()).
+  // nudgeGyroBias(mean, kAlpha).
   bool update(float gx, float gy, float gz, float norm);
-  void reset();
   bool latched() const { return latched_; }
   bool justExited() const { return justExited_; }
-  vec3 meanDps() const;                 // window mean, driver frame
-  float alpha() const { return kAlpha; }
+  void meanDps(vec3 &out) const; // window mean, driver frame
+  static constexpr float kAlpha = 0.02f;
 
 private:
+  void reset();
   void push(float dx, float dy, float dz, float norm);
   bool calm() const;
 
   static constexpr unsigned kWinTicks = 50;
   static constexpr float kGyroVarDps2 = 0.25f;
   static constexpr float kNormDev = 0.02f;
-  static constexpr float kAlpha = 0.02f;
   static constexpr float kExitDps = 1.5f;
   static constexpr float kExitNorm = 0.03f;
   static constexpr unsigned kCooldown = 25;
