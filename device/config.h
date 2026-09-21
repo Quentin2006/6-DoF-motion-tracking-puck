@@ -28,6 +28,16 @@ constexpr float EKF_GATE_MAHA = 11.34f;    // chi2 3-dof 99%: reject above this
 constexpr float EKF_GATE_NORM = 0.35f;     // soft-gate scale: R deweights above this (step 5), reject far above
 constexpr float EKF_GATE_NORM_FAR = 0.70f; // 2x EKF_GATE_NORM: coast above this
 
+// ------------------------------- CDC LINK -------------------------------
+// Serial is the ESP32-S3 USB-Serial-JTAG peripheral (FQBN CDCOnBoot=cdc), so
+// baud is a no-op for throughput: the pipe is capped by USB delivery (~512
+// kB/s measured), not by a line rate. The RX queue must be grown before
+// Serial.begin or HWCDC creates its 256 B default — and HWCDC's ISR silently
+// discards whatever does not fit, which is exactly what a video burst does.
+// Both are applied by the video task (src/display/video_task.cpp), on core 0.
+constexpr unsigned long CDC_BAUD = 921600;
+constexpr size_t CDC_RX_BYTES = 4096;
+
 // ------------------------------- DISPLAY -------------------------------
 // ESP32-S3 pin assignments
 constexpr int TFT_MOSI = 11;

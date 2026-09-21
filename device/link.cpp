@@ -2,12 +2,6 @@
 #include "packet.h"
 #include "frame.h"
 
-bool UsbLink::begin(unsigned long baud, size_t rxBuf) {
-  Serial.setRxBufferSize(rxBuf);
-  Serial.begin(baud);
-  return true;
-}
-
 void UsbLink::sendQuat(const float quat[4], const float gyro[3]) {
   const bool doSend = sendNow_;
   sendNow_ = !sendNow_;

@@ -15,6 +15,8 @@ namespace {
 volatile uint32_t gFrames = 0, gDrops = 0, gBad = 0, gBytes = 0;
 
 Display *gDisplay = nullptr;
+SemaphoreHandle_t gSerialReady = nullptr;
+volatile bool gGo = false;
 
 // One complete FRAME_VIDEO / FRAME_VIDEO_RLE payload -> the chunk's pixel
 // window, keeping the old UsbLink::pollVideoChunk rules: a raw chunk must be
@@ -76,6 +78,19 @@ void videoTaskEntry(void *) {
   uint8_t scratch[1024];
   FrameParser parser;
   bool open = false;
+
+  // CDC init happens here so its RX interrupt lands on this core (see the
+  // header). Grow the RX queue first, or HWCDC::begin creates its 256 B
+  // default and a burst overflows it.
+  Serial.setRxBufferSize(CDC_RX_BYTES);
+  Serial.begin(CDC_BAUD);
+  xSemaphoreGive(gSerialReady);
+
+  // boot() owns Serial until videoTaskGo() (it reads the CAL6 tokens).
+  while (!gGo) {
+    vTaskDelay(1);
+  }
+
   for (;;) {
     const size_t n = Serial.read(scratch, sizeof scratch);
     if (n == 0) {
@@ -104,9 +119,19 @@ void videoTaskEntry(void *) {
 
 void videoTaskStart(Display &display) {
   gDisplay = &display;
-  xTaskCreatePinnedToCore(videoTaskEntry, "video", VIDEO_TASK_STACK, nullptr, VIDEO_TASK_PRIO,
-                          nullptr, VIDEO_TASK_CORE);
+  gSerialReady = xSemaphoreCreateBinary();
+  if (xTaskCreatePinnedToCore(videoTaskEntry, "video", VIDEO_TASK_STACK, nullptr, VIDEO_TASK_PRIO,
+                              nullptr, VIDEO_TASK_CORE) != pdPASS) {
+    // Fail-stop, like setup()'s MPU halt: nothing can report this yet, because
+    // the task that was going to initialize Serial is the one that failed.
+    while (true) {
+      delay(1000);
+    }
+  }
+  xSemaphoreTake(gSerialReady, portMAX_DELAY);
 }
+
+void videoTaskGo() { gGo = true; }
 
 VideoStats videoTakeStats() {
   VideoStats s;

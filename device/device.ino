@@ -19,17 +19,17 @@ static void halt(const char *why) {
 }
 
 void setup() {
-  usbLink.begin(); // Serial + 4 KB RX queue; never fails
+  // Serial — and with it the CDC RX interrupt — belongs to the video task
+  // from here: it initializes the CDC on core 0, so the per-byte RX cost
+  // never lands on the fusion core. Nothing else may read Serial afterwards.
+  videoTaskStart(display);
   delay(500);
   rgbLedWrite(RGB_LED_PIN, 255, 0, 0); // calibrating / not ready
   if (!tracker.boot()) {
     halt("MPU6050 init failed");
   }
   display.begin();
-  // Video RX becomes a core-0 task from here, and it is the only Serial
-  // reader left: boot() above had to finish first, because it consumes the
-  // CAL6 tokens off the same RX queue.
-  videoTaskStart(display);
+  videoTaskGo(); // boot() is done with Serial; the panel is up
   rgbLedWrite(RGB_LED_PIN, 0, 255, 0); // calibrated, streaming
 }
 
