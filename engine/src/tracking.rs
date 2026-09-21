@@ -51,7 +51,12 @@ const VIDEO_MASK_BYTES: usize = VIDEO_TILES.div_ceil(8);
 const VIDEO_FRAG_MAX: usize = 1280; // JPEG bytes per fragment; 8 + this = FRAME_MAX_PAYLOAD
 const VIDEO_JPEG_MAX: usize = 49152; // device assembly buffer, and the largest frame accepted
 const JPEG_QUALITY: u8 = 75; // the one knob trading fidelity for frame rate
-const VIDEO_TARGET_FPS: u64 = 30;
+// The device's cost per stereo frame is ~30-34 ms (JPEGDEC decode ~20 ms for
+// 640x240, dirty-tile blit ~6 ms, fragment parse ~8 ms), so 30 fps left the RX
+// queue pinned at its 16 KB ceiling and the resulting byte loss cost 2-7
+// frames/s (measured on the puck). 25 fps is the sanctioned fallback: a 40 ms
+// budget against that cost, with the panel running at 25.
+const VIDEO_TARGET_FPS: u64 = 25;
 const VIDEO_HEARTBEAT_MS: u64 = 2000; // static scene: re-send so the device stays in video mode
 
 // Eye separation, matched to the panel/lens spacing: the eyes sit at -IPD_M/2

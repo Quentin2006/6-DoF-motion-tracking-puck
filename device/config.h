@@ -35,12 +35,17 @@ constexpr float EKF_GATE_NORM_FAR = 0.70f; // 2x EKF_GATE_NORM: coast above this
 // Serial.begin or HWCDC creates its 256 B default — and HWCDC's ISR silently
 // discards whatever does not fit.
 //
-// It has to hold a whole frame's fragments: the video task decodes and paints
-// one JPEG (~19 ms of decode) before it reads again, and a 640x240 q75 stereo
-// pair is a few kB more than the 8-15 kB a single 320x240 eye cost. Both are
-// applied by the video task (src/display/video_task.cpp), on core 0.
+// It has to hold a whole frame's fragments plus a full-canvas repaint: the
+// video task decodes and paints one 640x240 JPEG (~20 ms decode + ~6 ms of
+// dirty tiles) before it reads again, but when every tile is dirty (the first
+// frame, or the first frame after the idle RGB cycle) the blit alone is ~102 ms
+// at the measured SPI rate, and at ~85 kB/s that is ~9 kB arriving while the
+// task is not reading. Measured on the puck: with 16 KB a full-repaint frame
+// overran the queue and cost 2 frames; with 32 KB the queue never approaches
+// the ceiling. Both are applied by the video task
+// (src/display/video_task.cpp), on core 0.
 constexpr unsigned long CDC_BAUD = 921600;
-constexpr size_t CDC_RX_BYTES = 16384;
+constexpr size_t CDC_RX_BYTES = 32768;
 
 // ------------------------------- DISPLAY -------------------------------
 // ESP32-S3 pin assignments. The stereo pair shares MOSI/SCLK/DC/RST/BL and

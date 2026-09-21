@@ -47,18 +47,26 @@ Video runs the other way down the same port, at its own pace:
    │  jpeg-encoder q75 4:2:0, one JPEG for both eyes
    │  FRAME_VIDEO_MASK frame: 4 B header (frame/tiles) + 75 B mask
    │  FRAME_VIDEO fragment: 8 B header (frame/frag/count/len) + <= 1280 B JPEG
-   │  one fragment per slice of the 33 ms frame (never a burst: the USJ RX FIFO is 64 B)
+   │  one fragment per slice of the 40 ms frame (never a burst: the USJ RX FIFO is 64 B)
    ▼
  device/src/display/video_task.cpp  (core-0 task)
    │  VideoFragAssembler → JPEGDEC → Display::blitTile per dirty 16x16 tile
    ▼
- two ST7789 panels, one per eye (CS=10 left, CS=13 right) @ ~30 fps
+ two ST7789 panels, one per eye (CS=10 left, CS=13 right) @ 25 fps
 ```
 
-The dirty mask is what keeps 30 fps possible: a full both-panel blit costs
-2x153600 B at the measured 3.38 MB/s SPI rate = 90.8 ms (9 fps). The device
-cannot compute dirtiness itself — two 320x240 RGB565 shadows are 307 KB against
-82 KB free — so the host sends the changed-tile set instead.
+The dirty mask is what makes a real frame rate possible: a full both-panel blit
+costs 2x153600 B at the measured 3.38 MB/s SPI rate = 90.8 ms (9 fps). The
+device cannot compute dirtiness itself — two 320x240 RGB565 shadows are 307 KB
+against 82 KB free — so the host sends the changed-tile set instead.
+
+25 fps is the measured device capacity, not an arbitrary choice: one 640x240
+frame costs the video task ~30-34 ms (JPEGDEC decode ~20 ms, dirty-tile blit
+~6 ms, fragment parse ~8 ms), so a 33 ms frame interval left the RX queue pinned
+at its ceiling and cost 2-7 frames/s in lost bytes. At 25 fps (40 ms budget)
+the device holds `vid 25 drop 0` indefinitely, and `CDC_RX_BYTES = 32768`
+absorbs the one frame that is always slow — a full-canvas repaint is ~102 ms of
+blitting.
 
 **Key modules (`device/`)**
 
@@ -256,10 +264,11 @@ verification stays manual.
   gyro while still. The onboard LED goes red→green once streaming; the 1 Hz
 - **Host render:** `make engine` opens the puck serial port (native USB
   `303a:1001` @921600, or `PUCK_SERIAL=<port>` to pin one) and renders the rig.
-  Engine side: `video 30 fps drop 0 big 0 enc <2 ms` (two eye encodes per
-  stereo frame). Device side (1 Hz, on the same port): `vid 30 drop 0 bad 0
-  nomask 0 kb ~120`. `nomask > 0` means a frame was painted without its
-  dirty-tile mask — every tile repainted, a real fault.
+  Engine side: `video 25 fps drop 0 big 0 enc <2 ms` (two 320x240 eye encodes
+  per stereo frame, measured 1.4-1.6 ms) and no `seq gap:` line. Device side
+  (1 Hz, on the same port): `vid 25 drop 0 bad 0 nomask 0 kb ~85`. `nomask > 0`
+  means a frame was painted without its dirty-tile mask — every tile repainted,
+  a real fault.
 
 There is **no** unit coverage for `Ekf6Dof`, `StillDetector`, or `Mpu6050` — they
 are hardware-coupled and the serial/calibration path is their real test. Add a
