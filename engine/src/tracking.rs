@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bevy::camera::RenderTarget;
+use bevy::camera::{RenderTarget, Viewport};
 use bevy::prelude::*;
 use bevy::render::gpu_readback::{Readback, ReadbackComplete};
 use bevy::render::render_resource::{TextureFormat, TextureUsages};
@@ -21,6 +21,7 @@ const FRAME_MAGIC_0: u8 = 0x55;
 const FRAME_MAGIC_1: u8 = 0xAA;
 const FRAME_POSE: u8 = 0x01;
 const FRAME_VIDEO: u8 = 0x02; // one JPEG fragment: 8 B header + <= 1280 B
+const FRAME_VIDEO_MASK: u8 = 0x04; // dirty-tile mask for one frame: 4 B header + 75 B
 const FRAME_MAX_PAYLOAD: usize = 1288; // 8 + VIDEO_FRAG_MAX
 
 // Transport+render delay extrapolated from packet gyro, and display smoothing.
@@ -37,19 +38,58 @@ const PUCK_VID: u16 = 0x303a;
 const PUCK_PID: u16 = 0x1001;
 const SERIAL_BAUD: u32 = 921600;
 
-// Video stream to the puck panel: 320x240 baseline JPEG, fragmented into
-// FRAME_VIDEO frames. Must match device/src/display/video.h VIDEO_* constants.
-const VIDEO_W: usize = 320;
+// Video stream to the puck: one 640x240 baseline JPEG per frame holding the
+// stereo pair (left eye | right eye, side by side), fragmented into
+// FRAME_VIDEO frames and preceded by a FRAME_VIDEO_MASK frame naming the tiles
+// that changed. Must match device/src/display/video.h VIDEO_* constants.
+const VIDEO_W: usize = 640;
 const VIDEO_H: usize = 240;
+const VIDEO_PANEL_W: usize = 320; // one panel's half of the canvas
+const VIDEO_TILE: usize = 16; // tile grid == the 4:2:0 MCU the device decodes
+const VIDEO_TILES: usize = (VIDEO_W / VIDEO_TILE) * (VIDEO_H / VIDEO_TILE);
+const VIDEO_MASK_BYTES: usize = VIDEO_TILES.div_ceil(8);
 const VIDEO_FRAG_MAX: usize = 1280; // JPEG bytes per fragment; 8 + this = FRAME_MAX_PAYLOAD
 const VIDEO_JPEG_MAX: usize = 49152; // device assembly buffer, and the largest frame accepted
 const JPEG_QUALITY: u8 = 75; // the one knob trading fidelity for frame rate
 const VIDEO_TARGET_FPS: u64 = 30;
 const VIDEO_HEARTBEAT_MS: u64 = 2000; // static scene: re-send so the device stays in video mode
 
+// Eye separation, matched to the panel/lens spacing: the eyes sit at -IPD_M/2
+// and +IPD_M/2. It is the only stereo-geometry knob — both eyes keep Bevy's
+// default fov and get their 4:3 aspect from their own viewport.
+const IPD_M: f32 = 0.064;
+
 struct Frame {
-    rgba: Box<[u8]>, // 320x240 RGBA8 readback, pooled
+    rgba: Box<[u8]>, // VIDEO_W x VIDEO_H RGBA8 readback, pooled
+    // Dirty tiles relative to the previous frame, computed here because the
+    // device has no room for a shadow (two 320x240 RGB565 shadows are 307 KB
+    // against 82 KB free). 75 B a frame buys back the ~91 ms a full both-panel
+    // blit would cost, which is the difference between 9 fps and 30.
+    mask: [u8; VIDEO_MASK_BYTES],
     id: u16,
+}
+
+// Dirty tiles between two RGBA readbacks: a tile is dirty if any of its
+// VIDEO_TILE rows differs by a byte. 600 tiles x 16 rows = 9600 memcmps of
+// 64 B per frame, ~1% of a core, against the SPI cost of painting blind.
+fn dirty_mask(cur: &[u8], prev: &[u8]) -> [u8; VIDEO_MASK_BYTES] {
+    const COLS: usize = VIDEO_W / VIDEO_TILE;
+    let row_bytes = VIDEO_W * 4;
+    let mut mask = [0u8; VIDEO_MASK_BYTES];
+    for ty in 0..VIDEO_H / VIDEO_TILE {
+        for tx in 0..COLS {
+            let x = tx * VIDEO_TILE * 4;
+            let dirty = (0..VIDEO_TILE).any(|y| {
+                let off = (ty * VIDEO_TILE + y) * row_bytes + x;
+                cur[off..off + VIDEO_TILE * 4] != prev[off..off + VIDEO_TILE * 4]
+            });
+            if dirty {
+                let t = ty * COLS + tx;
+                mask[t >> 3] |= 1 << (t & 7);
+            }
+        }
+    }
+    mask
 }
 
 fn frame_crc_feed(mut crc: u16, b: u8) -> u16 {
@@ -84,6 +124,20 @@ fn build_frame(out: &mut [u8], ty: u8, payload: &[u8]) -> usize {
     out[5 + payload.len()] = (crc & 0xFF) as u8;
     out[5 + payload.len() + 1] = ((crc >> 8) & 0xFF) as u8;
     5 + payload.len() + 2
+}
+
+// Send one frame's dirty-tile mask. It must land before the fragments it
+// describes: the device paints the frame the mask names, and falls back to a
+// full both-panel repaint (~91 ms, and its `nomask` counter rises) when the
+// mask is missing or names another frame.
+fn send_mask<W: Write>(writer: &mut W, id: u16, mask: &[u8; VIDEO_MASK_BYTES]) {
+    let mut payload = [0u8; 4 + VIDEO_MASK_BYTES];
+    payload[0..2].copy_from_slice(&id.to_le_bytes());
+    payload[2..4].copy_from_slice(&(VIDEO_TILES as u16).to_le_bytes());
+    payload[4..].copy_from_slice(mask);
+    let mut frame = [0u8; 7 + 4 + VIDEO_MASK_BYTES];
+    let n = build_frame(&mut frame, FRAME_VIDEO_MASK, &payload);
+    let _ = writer.write_all(&frame[..n]);
 }
 
 // Fragment one JPEG into FRAME_VIDEO frames and write them, spreading the
@@ -377,8 +431,8 @@ fn setup_scene(
     ));
     commands.spawn((PointLight::default(), Transform::from_xyz(4.0, 8.0, 4.0)));
 
-    // Off-screen 320x240 RGBA8 target: COPY_SRC added for the readback copy
-    // (missing from new_target_texture's default usage).
+    // Off-screen 640x240 RGBA8 target holding the stereo pair: COPY_SRC added
+    // for the readback copy (missing from new_target_texture's default usage).
     let mut target = Image::new_target_texture(
         VIDEO_W as u32,
         VIDEO_H as u32,
@@ -388,21 +442,35 @@ fn setup_scene(
     target.texture_descriptor.usage |= TextureUsages::COPY_SRC;
     let target = images.add(target);
 
-    // The puck drives this rig; the capture camera rides along as a child, so
-    // Bevy's transform propagation keeps it coincident (order -1 renders it
-    // before the window camera). Rest quat (identity) looks down -Z, which is
-    // where the reference object sits.
+    // The puck drives this rig; the two eye cameras ride along as children, so
+    // Bevy's transform propagation keeps them on the rig and IPD_M apart from
+    // each other. Their viewports are the two halves of the target (order
+    // -2/-1 render before the window camera), and each eye's projection is
+    // built from its own 320x240 viewport — so both are 4:3 without an aspect
+    // override. Rest quat (identity) looks down -Z, which is where the
+    // reference object sits.
     commands
         .spawn((LookRig, Camera3d::default(), Transform::from_xyz(0.0, 1.5, 0.0)))
         .with_children(|rig| {
-            rig.spawn((
-                Camera3d::default(),
-                Camera {
-                    order: -1,
-                    ..default()
-                },
-                RenderTarget::Image(target.clone().into()),
-            ));
+            for i in 0..2u32 {
+                rig.spawn((
+                    Camera3d::default(),
+                    Camera {
+                        order: -2 + i as isize,
+                        viewport: Some(Viewport {
+                            physical_position: UVec2::new(i * VIDEO_PANEL_W as u32, 0),
+                            physical_size: UVec2::new(VIDEO_PANEL_W as u32, VIDEO_H as u32),
+                            depth: 0.0..1.0,
+                        }),
+                        ..default()
+                    },
+                    RenderTarget::Image(target.clone().into()),
+                    // Eye 0 is the left half of the canvas at -IPD_M/2, eye 1
+                    // the right at +IPD_M/2 (Bevy's +X is right when looking
+                    // down -Z).
+                    Transform::from_xyz((i as f32 - 0.5) * IPD_M, 0.0, 0.0),
+                ));
+            }
         });
     // Open the CDC port once: the original handle goes to the pose reader
     // thread, the clone to the paced video sender thread below.
@@ -453,6 +521,7 @@ fn setup_scene(
         let mut writer = writer;
         let mut out: Vec<u8> = Vec::with_capacity(VIDEO_JPEG_MAX);
         let mut cached: Vec<u8> = Vec::new(); // last frame sent, for the heartbeat
+        let mut cached_mask = [0u8; VIDEO_MASK_BYTES];
         let mut cached_id = 0u16;
         let mut last_sent = Instant::now();
         let interval = Duration::from_micros(1_000_000 / VIDEO_TARGET_FPS);
@@ -481,7 +550,9 @@ fn setup_scene(
                     } else {
                         cached.clear();
                         cached.extend_from_slice(&out);
+                        cached_mask = frm.mask;
                         cached_id = frm.id;
+                        send_mask(&mut writer, frm.id, &frm.mask);
                         send_jpeg(&mut writer, frm.id, &out, frame_start, interval);
                         sent += 1;
                         last_sent = Instant::now();
@@ -489,10 +560,13 @@ fn setup_scene(
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                     // Static scene: the render thread enqueues nothing, so keep
-                    // the device's idle RGB cycle away with a slow re-send.
+                    // the device's idle RGB cycle away with a slow re-send —
+                    // mask included, or the device would repaint both panels in
+                    // full (and count it) every two seconds.
                     if !cached.is_empty()
                         && last_sent.elapsed() >= Duration::from_millis(VIDEO_HEARTBEAT_MS)
                     {
+                        send_mask(&mut writer, cached_id, &cached_mask);
                         send_jpeg(&mut writer, cached_id, &cached, Instant::now(), interval);
                         last_sent = Instant::now();
                     }
@@ -538,8 +612,8 @@ fn setup_scene(
 // nothing at all (the sender's heartbeat covers the static scene).
 fn on_video_readback(readback: On<ReadbackComplete>, mut video: ResMut<VideoTx>) {
     let data = &readback.data;
-    // Tight-pack invariant: 320*4 = 1280 is a multiple of the 256-byte row
-    // alignment, so the readback is exactly 307200 bytes with no stride
+    // Tight-pack invariant: 640*4 = 2560 is a multiple of the 256-byte row
+    // alignment, so the readback is exactly 614400 bytes with no stride
     // padding. Fails loudly in debug/test if the GPU layout ever changes;
     // the release early-return below keeps the live path from slicing OOB.
     debug_assert_eq!(data.len(), VIDEO_W * 4 * VIDEO_H, "readback stride changed");
@@ -550,6 +624,12 @@ fn on_video_readback(readback: On<ReadbackComplete>, mut video: ResMut<VideoTx>)
     if video.prev_valid && &video.prev[..] == src {
         return; // static scene: no buffer taken, nothing enqueued
     }
+    // Nothing on the device is known to match the first frame, so it all goes.
+    let mask = if video.prev_valid {
+        dirty_mask(src, &video.prev)
+    } else {
+        [0xFFu8; VIDEO_MASK_BYTES]
+    };
     let mut buf = video
         .free_rx
         .try_recv()
@@ -559,7 +639,7 @@ fn on_video_readback(readback: On<ReadbackComplete>, mut video: ResMut<VideoTx>)
     video.prev_valid = true;
     let frame = video.frame_id;
     video.frame_id = frame.wrapping_add(1);
-    match video.frame_tx.try_send(Frame { rgba: buf, id: frame }) {
+    match video.frame_tx.try_send(Frame { rgba: buf, mask, id: frame }) {
         Ok(()) => {}
         // Sender behind: supersede the queued frame — it is already stale by the
         // time the sender would reach it — and retry, so the newest frame wins
@@ -693,6 +773,69 @@ mod tests {
         }
         want.extend_from_slice(&crc.to_le_bytes());
         assert_eq!(&frame[..n], &want[..]);
+    }
+
+    fn tile_bit(mask: &[u8; VIDEO_MASK_BYTES], tx: usize, ty: usize) -> bool {
+        let t = ty * (VIDEO_W / VIDEO_TILE) + tx;
+        mask[t >> 3] & (1 << (t & 7)) != 0
+    }
+
+    // Wire layout of one dirty-tile mask frame, pinned to the same literal bytes
+    // the device-side test (tests/video_test.cpp) asserts: magic,
+    // FRAME_VIDEO_MASK, len, 4 B header (frame/tiles, LE), mask, CRC-16.
+    #[test]
+    fn video_mask_wire_layout_is_pinned() {
+        let mut mask = [0u8; VIDEO_MASK_BYTES];
+        for (i, b) in mask.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        let mut wire = Vec::new();
+        send_mask(&mut wire, 0x1234, &mask);
+        let mut want = vec![
+            0x55, 0xAA, 0x04, 0x4F, 0x00, // magic, FRAME_VIDEO_MASK, len = 79
+            0x34, 0x12, 0x58, 0x02, // frame, tiles = 600
+        ];
+        want.extend_from_slice(&mask);
+        let mut crc: u16 = 0xFFFF;
+        for &b in &wire[2..5 + 4 + VIDEO_MASK_BYTES] {
+            crc = frame_crc_feed(crc, b);
+        }
+        want.extend_from_slice(&crc.to_le_bytes());
+        assert_eq!(wire, want);
+    }
+
+    // The mask must name exactly the tiles that changed, in the row-major
+    // column order the device's blit walks: a shifted bit paints the wrong
+    // 16x16 tile and leaves the changed one stale.
+    #[test]
+    fn dirty_mask_covers_exactly_the_changed_tiles() {
+        assert_eq!(VIDEO_TILES, 600);
+        assert_eq!((VIDEO_W / VIDEO_TILE, VIDEO_H / VIDEO_TILE), (40, 15));
+        let base = vec![0u8; VIDEO_W * 4 * VIDEO_H];
+        let poke = |buf: &mut [u8], tx: usize, ty: usize, dx: usize, dy: usize| {
+            let x = tx * VIDEO_TILE + dx;
+            let y = ty * VIDEO_TILE + dy;
+            buf[y * VIDEO_W * 4 + x * 4] = 0xFF;
+        };
+
+        // One corner pixel per tile: a whole tile goes dirty, its neighbours
+        // do not, and the count is exact.
+        let mut cur = base.clone();
+        poke(&mut cur, 21, 3, 0, 0);
+        poke(&mut cur, 21, 3, VIDEO_TILE - 1, VIDEO_TILE - 1);
+        poke(&mut cur, 0, 0, 0, 1);
+        poke(&mut cur, 39, 14, VIDEO_TILE - 1, 0);
+        let mask = dirty_mask(&cur, &base);
+        let set: usize = mask.iter().map(|b| b.count_ones() as usize).sum();
+        assert_eq!(set, 3, "one tile each for (21,3), (0,0), (39,14)");
+        assert!(tile_bit(&mask, 21, 3));
+        assert!(tile_bit(&mask, 0, 0));
+        assert!(tile_bit(&mask, 39, 14));
+        assert!(!tile_bit(&mask, 20, 3) && !tile_bit(&mask, 22, 3));
+        assert!(!tile_bit(&mask, 21, 2) && !tile_bit(&mask, 21, 4));
+
+        // An unchanged frame repaints nothing at all.
+        assert_eq!(dirty_mask(&base, &base), [0u8; VIDEO_MASK_BYTES]);
     }
 
     // Fragments come out in order with the expected lengths, and the parser puts
