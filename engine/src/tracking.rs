@@ -88,8 +88,12 @@ fn dirty_chunks(prev: &[u8], cur: &[u8]) -> Vec<usize> {
 const PREDICT_TAU_S: f32 = 0.008;
 const SMOOTH_TAU_S: f32 = 0.006;
 
-// Puck serial link: /dev/ttyACM0 @ 921600 (1a86:55d3 bridge: real wire speed).
-const DEFAULT_SERIAL_PORT: &str = "/dev/ttyACM0";
+// Puck serial link @ 921600. The S3 board exposes two USB ports: the native
+// USB (Espressif 303a:1001 — the firmware's CDC `Serial`, where the frames
+// are) and the on-board UART bridge (1a86:55d3 — flash/console only). Attach
+// by VID/PID: the ttyACM index depends on plug order, the VID/PID does not.
+const PUCK_VID: u16 = 0x303a;
+const PUCK_PID: u16 = 0x1001;
 const SERIAL_BAUD: u32 = 921600;
 
 // Video stream to the puck panel: 320x240 RGB565 as FRAME_VIDEO frames.
@@ -285,8 +289,39 @@ impl Plugin for TrackPlugin {
     }
 }
 
+// Native-USB puck port out of the enumerated ports; None if it is unplugged.
+fn pick_puck_port(ports: &[serialport::SerialPortInfo]) -> Option<&str> {
+    ports
+        .iter()
+        .find(|p| {
+            matches!(&p.port_type,
+                serialport::SerialPortType::UsbPort(u) if u.vid == PUCK_VID && u.pid == PUCK_PID)
+        })
+        .map(|p| p.port_name.as_str())
+}
+
 fn open_puck_port() -> Box<dyn serialport::SerialPort> {
-    let name = std::env::var("PUCK_SERIAL").unwrap_or_else(|_| DEFAULT_SERIAL_PORT.into());
+    let name = match std::env::var("PUCK_SERIAL") {
+        Ok(p) => p,
+        Err(_) => {
+            let ports = serialport::available_ports().unwrap_or_default();
+            let found = match pick_puck_port(&ports) {
+                Some(p) => p.to_owned(),
+                None => {
+                    let seen: Vec<String> = ports
+                        .iter()
+                        .map(|p| format!("{} ({:?})", p.port_name, p.port_type))
+                        .collect();
+                    panic!(
+                        "no puck on native USB {PUCK_VID:04x}:{PUCK_PID:04x}; enumerated {seen:?} \
+                         — set PUCK_SERIAL=<port> to override"
+                    );
+                }
+            };
+            found
+        }
+    };
+    println!("puck serial: {name} @ {SERIAL_BAUD}");
     serialport::new(&name, SERIAL_BAUD)
         .timeout(Duration::from_millis(50))
         .open()
@@ -535,6 +570,29 @@ mod tests {
             .chunks(2)
             .map(|c| u8::from_str_radix(std::str::from_utf8(c).unwrap(), 16).unwrap())
             .collect()
+    }
+
+    #[test]
+    fn pick_puck_port_prefers_native_usb_over_the_bridge() {
+        let usb = |name: &str, vid: u16, pid: u16| serialport::SerialPortInfo {
+            port_name: name.to_owned(),
+            port_type: serialport::SerialPortType::UsbPort(serialport::UsbPortInfo {
+                vid,
+                pid,
+                serial_number: None,
+                manufacturer: None,
+                product: None,
+            }),
+        };
+        let bridge = usb("/dev/ttyACM1", 0x1a86, 0x55d3);
+        let native = usb("/dev/ttyACM2", PUCK_VID, PUCK_PID);
+        // Enumeration order must not decide the pick.
+        assert_eq!(
+            pick_puck_port(&[bridge.clone(), native.clone()]),
+            Some("/dev/ttyACM2")
+        );
+        assert_eq!(pick_puck_port(&[native, bridge]), Some("/dev/ttyACM2"));
+        assert_eq!(pick_puck_port(&[]), None);
     }
 
     #[test]

@@ -26,8 +26,9 @@ make engine    # run the Bevy visualizer
 make all       # compile + upload + engine
 make test      # engine unit tests + host packet-contract test
 ```
-FQBN is `esp32:esp32:esp32s3:CDCOnBoot=cdc`, port `/dev/ttyACM0` at 921600
-(`PUCK_SERIAL` env overrides the port).
+FQBN is `esp32:esp32:esp32s3:CDCOnBoot=cdc`; flashing uses the UART bridge at
+`/dev/ttyACM0`. The engine finds the puck itself — native USB `303a:1001` at
+921600 — so both cables can stay plugged (`PUCK_SERIAL` env overrides the port).
 
 ## Status LED
 

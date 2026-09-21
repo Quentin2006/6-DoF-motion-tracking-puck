@@ -3,5 +3,9 @@ default_port: /dev/ttyACM0
 default_port_config:
   baudrate: 921600
 # Native USB (USB port, not COM): enumerates as 303a:1001 Espressif
-# USB-JTAG/serial. Baud is don't-care on native CDC; the node stays
-# /dev/ttyACM0 here because the COM cable is unplugged while native runs.
+# USB-JTAG/serial; the COM port is the 1a86:55d3 UART bridge. Baud is
+# don't-care on native CDC. The literal /dev/ttyACM0 below is only correct
+# while it is the sole USB-CDC node — the kernel index follows plug order,
+# so with both cables in the bridge takes ACM0. Pin the node explicitly
+# with arduino-cli's -p instead of trusting the index. The engine does not
+# read this file: it finds the native port by VID:PID.

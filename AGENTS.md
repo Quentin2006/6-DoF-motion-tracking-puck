@@ -32,7 +32,7 @@ Two independent halves, no shared code, wired together by a single root
    │  FRAME_POSE frame: magic 0x55 0xAA | type u8 | len u16 LE | 36 B payload | crc u16 LE
    │  payload: seq u32 | stamp u32 | quat xyzw f32 | gyro xyz f32  (all LE)
    ▼
- engine/src/tracking.rs::update  (serial /dev/ttyACM0 @921600, drain-to-latest)
+ engine/src/tracking.rs::update  (serial: native USB 303a:1001 @921600, drain-to-latest)
    ▼
  LookRig camera Transform.rotation
 ```
@@ -106,7 +106,7 @@ make test             # cargo test (engine) + host packet-contract test (device/
 ```
 
 - **FQBN** default `esp32:esp32:esp32s3:CDCOnBoot=cdc` (in `Makefile` `?=` and `device/sketch.yaml`); override with `make compile FQBN=<other>`.
-- **Port** `/dev/ttyACM0`, **baud** 921600 (native-CDC baud is don't-care; `PUCK_SERIAL` env overrides the port).
+- **Engine port:** the native-USB puck — selected by USB VID:PID `303a:1001` from `serialport::available_ports()`, because the `ttyACM<n>` index depends on plug order (bridge `1a86:55d3` + native both plugged ⇒ native is not `ttyACM0`). `PUCK_SERIAL` overrides with any explicit node. **Baud** 921600 (native-CDC baud is don't-care). Firmware flash/monitor still uses `Makefile`/`sketch.yaml`'s literal `/dev/ttyACM0` (the UART bridge).
 - `make engine` from repo root, or `cargo run` from `engine/`.
 - `make lsp` = compile with `--only-compilation-database --build-path ./build`, then a `jq` rewrite that maps `build/sketch/` → `device/`, renames `.ino.cpp` → `.ino`, injects `-x c++` on `.ino` files, and strips `-MMD`/`-o`/object args. The `.clangd` compiler/sysroot override handles toolchain include discovery.
 
@@ -203,8 +203,8 @@ verification stays manual.
   CAL6 procedure (`Tracker::maybeRunAccelCal` / `runAccelCal` in `src/position/tracker.cpp`)
   calibrates the accelerometer (6 poses); `src/position/still_detect.cpp` re-biases
   gyro while still. The onboard LED goes red→green once streaming; the 1 Hz
-- **Host render:** `make engine` opens the puck serial port (`PUCK_SERIAL` or
-  `/dev/ttyACM0` @921600) and renders the rig.
+- **Host render:** `make engine` opens the puck serial port (native USB
+  `303a:1001` @921600, or `PUCK_SERIAL=<port>` to pin one) and renders the rig.
 
 There is **no** unit coverage for `Ekf6Dof`, `StillDetector`, or `Mpu6050` — they
 are hardware-coupled and the serial/calibration path is their real test. Add a
