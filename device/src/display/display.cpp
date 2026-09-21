@@ -7,12 +7,31 @@ namespace {
 constexpr int kCsPins[2] = {TFT_CS, TFT_CS2};
 } // namespace
 
+// Neither instance owns the reset pin. The panels share TFT_RST, and
+// Adafruit's init() *always* pulses the reset line it was given, so a second
+// instance constructed with it resets the first panel again — after that
+// panel's own init issued SLPOUT/DISPON — and leaves panel 0 asleep and blank.
+// begin() pulses the shared line once instead, and each panel's own init still
+// sends the software reset that is addressed to it.
 Display::Display()
-    : tft_{Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST), Adafruit_ST7789(TFT_CS2, TFT_DC, TFT_RST)} {}
+    : tft_{Adafruit_ST7789(TFT_CS, TFT_DC, -1), Adafruit_ST7789(TFT_CS2, TFT_DC, -1)} {}
 
 void Display::begin() {
   pinMode(TFT_BL, OUTPUT);
   digitalWrite(TFT_BL, HIGH);
+  // One hardware reset for both panels, with the timings Adafruit_SPITFT's own
+  // reset uses. It has to precede both inits and must not be repeated between
+  // them: the line is shared, so a second pulse would clear whichever panel was
+  // initialized first. The level is set before the driver is enabled, so
+  // enabling it (which applies the port's current latch value) does not pulse
+  // the line low first.
+  digitalWrite(TFT_RST, HIGH);
+  pinMode(TFT_RST, OUTPUT);
+  delay(100);
+  digitalWrite(TFT_RST, LOW);
+  delay(100);
+  digitalWrite(TFT_RST, HIGH);
+  delay(200);
   // Start the bus once, with the pins the panels are actually wired to: a
   // second init() calls SPI.begin() with all-default pins, and the core
   // returns immediately when the bus is already up (SPIClass::begin exits at
