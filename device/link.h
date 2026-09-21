@@ -1,26 +1,11 @@
 #pragma once
-#include "packet.h"
-#include "src/display/video.h"
-#include "frame.h"
 #include <Arduino.h>
 
+// Pose out over Serial (the framed CDC link in frame.h). The CDC itself is
+// owned by the video task (src/display/video_task.cpp), which initializes it
+// on core 0 so its per-byte RX interrupt never runs on the fusion core.
 class UsbLink {
 public:
-  // Grow the CDC RX buffer (default 256 B) before Serial.begin so burst
-  // video frames fit. The 1a86:55d3 panel bridge is a real UART: baud is wire
-  // speed, 921600 keeps a compressed 10 fps stream under budget.
-  // Always returns true (nothing to fail).
-  bool begin(unsigned long baud = 921600, size_t rxBuf = 4096);
-
-  // Streaming pump: consume at most one segment per call, return at most one
-  // video chunk (never a drain — that would starve 500 Hz fusion). Parses
-  // the 8 B header into hdr and copies the payload into `out`, which must
-  // be 4-byte aligned and hold VIDEO_PAYLOAD_MAX bytes with
-  // hdr.len == VIDEO_PAYLOAD_MAX (Display::chunk blits it via SPI DMA word
-  // reads). Returns payload bytes, or 0 when no complete FRAME_VIDEO frame
-  // arrived / the header is short / the length is out of range.
-  int pollVideoChunk(uint8_t *out, VideoChunkHdr &hdr);
-
   // Build the 36 B v2 packet (stamp = micros()) and write one FRAME_POSE
   // frame to Serial. ~250 Hz: alternates send/skip per call, matching the
   // 500 Hz tick rate.
@@ -29,7 +14,6 @@ public:
   uint32_t sequence() const { return pktSeq_; }
 
 private:
-  FrameParser parser_;
   uint32_t pktSeq_ = 0;
   bool sendNow_ = true;
 };

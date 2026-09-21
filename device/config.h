@@ -28,6 +28,16 @@ constexpr float EKF_GATE_MAHA = 11.34f;    // chi2 3-dof 99%: reject above this
 constexpr float EKF_GATE_NORM = 0.35f;     // soft-gate scale: R deweights above this (step 5), reject far above
 constexpr float EKF_GATE_NORM_FAR = 0.70f; // 2x EKF_GATE_NORM: coast above this
 
+// ------------------------------- CDC LINK -------------------------------
+// Serial is the ESP32-S3 USB-Serial-JTAG peripheral (FQBN CDCOnBoot=cdc), so
+// baud is a no-op for throughput: the pipe is capped by USB delivery (~512
+// kB/s measured), not by a line rate. The RX queue must be grown before
+// Serial.begin or HWCDC creates its 256 B default — and HWCDC's ISR silently
+// discards whatever does not fit, which is exactly what a video burst does.
+// Both are applied by the video task (src/display/video_task.cpp), on core 0.
+constexpr unsigned long CDC_BAUD = 921600;
+constexpr size_t CDC_RX_BYTES = 4096;
+
 // ------------------------------- DISPLAY -------------------------------
 // ESP32-S3 pin assignments
 constexpr int TFT_MOSI = 11;
@@ -41,10 +51,16 @@ constexpr int TFT_H = 320;
 constexpr uint32_t TFT_SPI_FREQ = 62500000; // 62.5 MHz: ST7789VW §7.4.3 Table 6 TSCYCW min 16 ns write cycle; fallback 40 MHz on any tear
 constexpr unsigned long DISPLAY_COLOR_PERIOD_MS = 5000; // solid RGB cycle step
 constexpr unsigned long VIDEO_IDLE_MS = 10000; // RGB cycle takes over after this long with no chunks
-// Budgeted video drain: max 16 chunks under 1200 us inside one SPI
-// transaction; fusion + ~0.35 ms I2C must still fit the 2000 us tick.
-constexpr int VIDEO_DRAIN_MAX_CHUNKS = 16;
-constexpr unsigned long VIDEO_DRAIN_BUDGET_US = 1200;
+
+// Video RX + panel blit task (src/display/video_task.cpp). It owns the whole
+// Serial RX path, and it is pinned to core 0 because the CDC stack pops one
+// FreeRTOS queue item per byte: at ~400 kB/s that is ~400k pops/s on whatever
+// core calls read(), and on core 1 (the Arduino loop core, where the 500 Hz
+// fusion tick lives) it starves Tracker::step(). Core 1 keeps the loop task to
+// itself; the burst cost moves to a core that has nothing else to do.
+constexpr int VIDEO_TASK_CORE = 0;
+constexpr int VIDEO_TASK_PRIO = 5;
+constexpr uint32_t VIDEO_TASK_STACK = 8192; // bytes: scratch + FrameParser + payload copy
 
 // ------------------------------- STATUS LED -------------------------------
 // Onboard WS2812 addressable RGB (GPIO48 on the stock S3 devkit). Driven via
