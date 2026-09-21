@@ -17,6 +17,7 @@ constexpr uint8_t FRAME_MAGIC_0 = 0x55;
 constexpr uint8_t FRAME_MAGIC_1 = 0xAA;
 constexpr uint8_t FRAME_POSE = 0x01;
 constexpr uint8_t FRAME_VIDEO = 0x02; // one JPEG fragment: 8 B header + <= 1280 B
+constexpr uint8_t FRAME_VIDEO_MASK = 0x04; // dirty-tile mask for one stereo frame: 79 B
 constexpr size_t FRAME_MAX_PAYLOAD = 1288; // largest payload: 8 + VIDEO_FRAG_MAX
 constexpr size_t FRAME_HDR_LEN = 5;        // magic[2] + type + len[2]
 constexpr size_t FRAME_CRC_LEN = 2;

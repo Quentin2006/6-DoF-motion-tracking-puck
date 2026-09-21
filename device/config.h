@@ -35,18 +35,26 @@ constexpr float EKF_GATE_NORM_FAR = 0.70f; // 2x EKF_GATE_NORM: coast above this
 // Serial.begin or HWCDC creates its 256 B default — and HWCDC's ISR silently
 // discards whatever does not fit.
 //
-// It has to hold a whole frame's fragments: the video task decodes and paints
-// one JPEG (~25-30 ms of SPI + decode) before it reads again, and a 320x240
-// q75 frame is 8-15 kB. Both are applied by the video task
+// It has to hold a whole frame's fragments plus a full-canvas repaint: the
+// video task decodes and paints one 640x240 JPEG (~20 ms decode + ~6 ms of
+// dirty tiles) before it reads again, but when every tile is dirty (the first
+// frame, or the first frame after the idle RGB cycle) the blit alone is ~102 ms
+// at the measured SPI rate, and at ~85 kB/s that is ~9 kB arriving while the
+// task is not reading. Measured on the puck: with 16 KB a full-repaint frame
+// overran the queue and cost 2 frames; with 32 KB the queue never approaches
+// the ceiling. Both are applied by the video task
 // (src/display/video_task.cpp), on core 0.
 constexpr unsigned long CDC_BAUD = 921600;
-constexpr size_t CDC_RX_BYTES = 16384;
+constexpr size_t CDC_RX_BYTES = 32768;
 
 // ------------------------------- DISPLAY -------------------------------
-// ESP32-S3 pin assignments
+// ESP32-S3 pin assignments. The stereo pair shares MOSI/SCLK/DC/RST/BL and
+// has one chip select each: CS is what routes a tile to the left or the right
+// eye (Display owns the per-panel CS handling; the panel carries no address).
 constexpr int TFT_MOSI = 11;
 constexpr int TFT_SCLK = 12;
-constexpr int TFT_CS = 10;
+constexpr int TFT_CS = 10;  // panel 0 (canvas left half)
+constexpr int TFT_CS2 = 13; // panel 1 (canvas right half)
 constexpr int TFT_DC = 9;
 constexpr int TFT_RST = 8;
 constexpr int TFT_BL = 7;
@@ -56,9 +64,10 @@ constexpr int TFT_H = 320;
 // core's integer divider on the 80 MHz APB cannot reach it — any request from
 // 40 to 70 MHz lands on the same divider and yields 40 MHz, measured at
 // 3.38 MB/s of pixels through the polling write path (80 MHz, SPI_CLK_EQU_SYSCLK,
-// measures 5.17 MB/s but is past the panel's write-cycle spec). A full-frame
-// blit is therefore ~45 ms, which is why the video task blits only the blocks
-// that actually changed (src/display/video_task.cpp).
+// measures 5.17 MB/s but is past the panel's write-cycle spec). One panel's
+// full frame is therefore ~45 ms, and the stereo pair's is ~91 ms — 9 fps on
+// its own, which is why the host sends a dirty-tile mask and the video task
+// blits only the tiles it names (src/display/video_task.cpp).
 constexpr uint32_t TFT_SPI_FREQ = 62500000;
 constexpr unsigned long DISPLAY_COLOR_PERIOD_MS = 5000; // solid RGB cycle step
 constexpr unsigned long VIDEO_IDLE_MS = 10000; // RGB cycle takes over after this long with no chunks

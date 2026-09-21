@@ -43,7 +43,8 @@ void loop() {
   if ((unsigned long)(millis() - lastVidMs) >= 1000UL) {
     lastVidMs = millis();
     const VideoStats v = videoTakeStats();
-    Serial.printf("vid %lu drop %lu bad %lu kb %lu\n", (unsigned long)v.frames,
-                  (unsigned long)v.drops, (unsigned long)v.bad, (unsigned long)v.kb);
+    Serial.printf("vid %lu drop %lu bad %lu nomask %lu kb %lu\n", (unsigned long)v.frames,
+                  (unsigned long)v.drops, (unsigned long)v.bad, (unsigned long)v.nomask,
+                  (unsigned long)v.kb);
   }
 }
