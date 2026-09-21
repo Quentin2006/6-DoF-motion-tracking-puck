@@ -21,10 +21,14 @@ engine:
 # Cross-contract + engine tests. The C++ host test asserts the firmware packet
 # producer (device/packet.h) matches tests/packet_fixture.txt; cargo test asserts
 # the engine parser matches the same bytes. Requires a host g++.
+# tests/video_test.cpp is built with ASAN so "the assembler never writes past
+# its buffer" is a real assertion (redzone), not a code-reading exercise.
 test:
 	mkdir -p build
 	g++ -std=c++17 -Idevice tests/packet_test.cpp -o build/packet_test
 	./build/packet_test tests/packet_fixture.txt
 	g++ -std=c++17 -Idevice tests/frame_test.cpp -o build/frame_test
 	./build/frame_test
+	g++ -std=c++17 -fsanitize=address -Idevice tests/video_test.cpp -o build/video_test
+	./build/video_test
 	cd engine && cargo test

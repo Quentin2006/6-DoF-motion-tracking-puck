@@ -85,11 +85,11 @@ int main() {
     vpayload[0] = 7;
     vpayload[1] = 0; // frame id 7 LE
     vpayload[2] = 3;
-    vpayload[3] = 0; // idx 3
-    vpayload[4] = 120;
-    vpayload[5] = 0; // count 120
+    vpayload[3] = 0; // frag index 3
+    vpayload[4] = 4;
+    vpayload[5] = 0; // frag count 4
     vpayload[6] = 16;
-    vpayload[7] = 0; // len 16
+    vpayload[7] = 0; // frag len 16
     for (int i = 0; i < 16; i++) {
       vpayload[8 + i] = (uint8_t)(0xA0 + i);
     }
