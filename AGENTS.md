@@ -41,15 +41,16 @@ Two independent halves, no shared code, wired together by a single root
 
 | File | Role |
 |---|---|
-| `device.ino` | Orchestrator: `setup()` init/calib, `loop()` (tick → send → video drain → report → panel tick) |
+| `device.ino` | Orchestrator: `setup()` init/calib → `videoTaskStart()`, `loop()` (tick → send → report → video counters) |
 | `config.h` | Single source of all compile-time constants (pins, FSR, gravity, CDC framing, all EKF sigmas/gates, axis map, display pins) |
 | `src/position/tracker.{h,cpp}` | Pipeline glue + `micros()` scheduler + CAL6 accelerometer calibration + 1 Hz status line; owns `Mpu6050`, `Ekf6Dof`, `StillDetector` |
 | `src/position/mpu6050.{h,cpp}` | I2C driver + NVS accel-cal persistence (`Preferences`, namespace `mpu`, keys `ax0-2`/`as0-2`) |
 | `src/position/fusion.{h,cpp}` | `Ekf6Dof` — 6-state EKF (quat w,x,y,z + gyro bias) |
 | `src/position/still_detect.{h,cpp}` | `StillDetector` — gyro re-bias while stationary (50-tick window, variance/norm gates) |
-| `link.{h,cpp}` | USB-CDC framed link (`Serial`): FRAME_POSE out, FRAME_VIDEO/FRAME_VIDEO_RLE in, pose/video counters |
-| `frame.h` | Framed CDC byte-stream contract (magic/type/len/CRC) — host-compilable, parsed by `link.cpp` and `engine/src/tracking.rs` |
+| `link.{h,cpp}` | USB-CDC pose-out link (`Serial`): FRAME_POSE frames, sequence counter |
+| `frame.h` | Framed CDC byte-stream contract (magic/type/len/CRC) — host-compilable, parsed by `link.cpp`/`video_task.cpp` and `engine/src/tracking.rs` |
 | `src/display/display.{h,cpp}` | ST7789 panel: chunk blit, burst transaction, idle RGB cycle |
+| `src/display/video_task.{h,cpp}` | Core-0 task owning the whole Serial RX path: parse FRAME_VIDEO / FRAME_VIDEO_RLE chunks, blit them to the panel, 1 Hz `vid/drop/bad/kb` counters |
 | `src/display/video.h` | Video wire contract: 320×240 RGB565 chunks + RLE decode — host-compilable, mirrored by `engine/src/tracking.rs` |
 | `packet.h` | Canonical 36 B pose payload + `build_quat_packet()` — host-compilable, single source of the byte contract |
 

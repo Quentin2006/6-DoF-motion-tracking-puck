@@ -2,9 +2,9 @@ default_fqbn: esp32:esp32:esp32s3
 default_port: /dev/ttyACM0
 default_port_config:
   baudrate: 921600
-# Native USB (USB port, not COM): enumerates as 303a:1001 Espressif
-# USB-JTAG/serial; the COM port is the 1a86:55d3 UART bridge. Baud is
-# don't-care on native CDC. The literal /dev/ttyACM0 below is only correct
+# USB port (not COM): the S3's USB-Serial-JTAG peripheral, enumerating as
+# 303a:1001; the COM port is the 1a86:55d3 UART bridge. Baud is a no-op for
+# throughput on USB-JTAG. The literal /dev/ttyACM0 below is only correct
 # while it is the sole USB-CDC node — the kernel index follows plug order,
 # so with both cables in the bridge takes ACM0. Pin the node explicitly
 # with arduino-cli's -p instead of trusting the index. The engine does not

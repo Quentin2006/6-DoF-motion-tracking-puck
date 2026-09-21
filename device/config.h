@@ -41,10 +41,16 @@ constexpr int TFT_H = 320;
 constexpr uint32_t TFT_SPI_FREQ = 62500000; // 62.5 MHz: ST7789VW §7.4.3 Table 6 TSCYCW min 16 ns write cycle; fallback 40 MHz on any tear
 constexpr unsigned long DISPLAY_COLOR_PERIOD_MS = 5000; // solid RGB cycle step
 constexpr unsigned long VIDEO_IDLE_MS = 10000; // RGB cycle takes over after this long with no chunks
-// Budgeted video drain: max 16 chunks under 1200 us inside one SPI
-// transaction; fusion + ~0.35 ms I2C must still fit the 2000 us tick.
-constexpr int VIDEO_DRAIN_MAX_CHUNKS = 16;
-constexpr unsigned long VIDEO_DRAIN_BUDGET_US = 1200;
+
+// Video RX + panel blit task (src/display/video_task.cpp). It owns the whole
+// Serial RX path, and it is pinned to core 0 because the CDC stack pops one
+// FreeRTOS queue item per byte: at ~400 kB/s that is ~400k pops/s on whatever
+// core calls read(), and on core 1 (the Arduino loop core, where the 500 Hz
+// fusion tick lives) it starves Tracker::step(). Core 1 keeps the loop task to
+// itself; the burst cost moves to a core that has nothing else to do.
+constexpr int VIDEO_TASK_CORE = 0;
+constexpr int VIDEO_TASK_PRIO = 5;
+constexpr uint32_t VIDEO_TASK_STACK = 8192; // bytes: scratch + FrameParser + payload copy
 
 // ------------------------------- STATUS LED -------------------------------
 // Onboard WS2812 addressable RGB (GPIO48 on the stock S3 devkit). Driven via
