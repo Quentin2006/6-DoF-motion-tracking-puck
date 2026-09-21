@@ -1,7 +1,8 @@
-use std::io::{Read as _, Write as _};
-use std::sync::mpsc::{SyncSender, sync_channel};
+use std::io::{Read as _, Write};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bevy::camera::RenderTarget;
 use bevy::prelude::*;
@@ -19,71 +20,9 @@ const PACKET_LEN: usize = 36;
 const FRAME_MAGIC_0: u8 = 0x55;
 const FRAME_MAGIC_1: u8 = 0xAA;
 const FRAME_POSE: u8 = 0x01;
-const FRAME_VIDEO: u8 = 0x02;
-const FRAME_VIDEO_RLE: u8 = 0x03;
-const FRAME_MAX_PAYLOAD: usize = 1288;
+const FRAME_VIDEO: u8 = 0x02; // one JPEG fragment: 8 B header + <= 1280 B
+const FRAME_MAX_PAYLOAD: usize = 1288; // 8 + VIDEO_FRAG_MAX
 
-// Per-chunk RLE over the 640 u16 LE words of one chunk (must mirror
-// rle_decode_565 in device/src/display/video.h). Bit7 = 1 run (count 1..128 + one LE
-// word), bit7 = 0 literal (count 1..128 + count LE words); a zero count
-// nibble encodes 128. Worst case (alternating words) is ~1310 B, so the
-// caller falls back to raw whenever the encoding is not strictly smaller.
-fn rle_encode_565(chunk: &[u8]) -> Vec<u8> {
-    debug_assert_eq!(chunk.len(), VIDEO_PAYLOAD_MAX);
-    let words = chunk.len() / 2;
-    let mut out = Vec::with_capacity(chunk.len());
-    let word = |i: usize| u16::from_le_bytes([chunk[2 * i], chunk[2 * i + 1]]);
-    let mut i = 0;
-    while i < words {
-        // Run length at i (cap 128: 0 encodes 128).
-        let v = word(i);
-        let mut run = 1;
-        while i + run < words && run < 128 && word(i + run) == v {
-            run += 1;
-        }
-        if run >= 3 {
-            out.push(0x80 | ((run % 128) as u8));
-            out.extend_from_slice(&v.to_le_bytes());
-            i += run;
-            continue;
-        }
-        // Literal run: extend until a 3+ run starts (cap 128).
-        let start = i;
-        let mut lit = 0;
-        while i + lit < words && lit < 128 {
-            let j = i + lit;
-            let w = word(j);
-            let mut r = 1;
-            while j + r < words && r < 128 && word(j + r) == w {
-                r += 1;
-            }
-            // A 3+ run ahead ends the literal (emitted as a run next turn).
-            if r >= 3 {
-                break;
-            }
-            lit += 1;
-        }
-        // Here lit >= 1: run < 3 above guarantees progress. (A 3+ run at i
-        // breaks with lit == 0 only when the outer run>=3 already continued.)
-        out.push((lit % 128) as u8);
-        for k in 0..lit {
-            let w = word(start + k);
-            out.extend_from_slice(&w.to_le_bytes());
-        }
-        i = start + lit;
-    }
-    out
-}
-// Dirty 2-row chunk indices where cur differs from prev (1280 B slices).
-fn dirty_chunks(prev: &[u8], cur: &[u8]) -> Vec<usize> {
-    debug_assert_eq!(prev.len(), VIDEO_FRAME_BYTES);
-    debug_assert_eq!(cur.len(), VIDEO_FRAME_BYTES);
-    prev.chunks_exact(VIDEO_PAYLOAD_MAX)
-        .zip(cur.chunks_exact(VIDEO_PAYLOAD_MAX))
-        .enumerate()
-        .filter_map(|(i, (p, c))| if p != c { Some(i) } else { None })
-        .collect()
-}
 // Transport+render delay extrapolated from packet gyro, and display smoothing.
 const PREDICT_TAU_S: f32 = 0.008;
 const SMOOTH_TAU_S: f32 = 0.006;
@@ -98,16 +37,18 @@ const PUCK_VID: u16 = 0x303a;
 const PUCK_PID: u16 = 0x1001;
 const SERIAL_BAUD: u32 = 921600;
 
-// Video stream to the puck panel: 320x240 RGB565 as FRAME_VIDEO frames.
-// Must match device/src/display/video.h VIDEO_* constants.
+// Video stream to the puck panel: 320x240 baseline JPEG, fragmented into
+// FRAME_VIDEO frames. Must match device/src/display/video.h VIDEO_* constants.
 const VIDEO_W: usize = 320;
 const VIDEO_H: usize = 240;
-const VIDEO_PAYLOAD_MAX: usize = 1280; // 2 rows x 320 px x 2 B
-const VIDEO_CHUNKS: usize = 120; // 240 rows / 2 rows per 1280 B chunk
-const VIDEO_FRAME_BYTES: usize = VIDEO_W * VIDEO_H * 2; // 153600 RGB565
+const VIDEO_FRAG_MAX: usize = 1280; // JPEG bytes per fragment; 8 + this = FRAME_MAX_PAYLOAD
+const VIDEO_JPEG_MAX: usize = 49152; // device assembly buffer, and the largest frame accepted
+const JPEG_QUALITY: u8 = 75; // the one knob trading fidelity for frame rate
+const VIDEO_TARGET_FPS: u64 = 30;
+const VIDEO_HEARTBEAT_MS: u64 = 2000; // static scene: re-send so the device stays in video mode
 
 struct Frame {
-    bytes: Box<[u8]>,
+    rgba: Box<[u8]>, // 320x240 RGBA8 readback, pooled
     id: u16,
 }
 
@@ -145,25 +86,39 @@ fn build_frame(out: &mut [u8], ty: u8, payload: &[u8]) -> usize {
     5 + payload.len() + 2
 }
 
-// Encode one dirty chunk and burst it as a FRAME_VIDEO / FRAME_VIDEO_RLE
-// frame. Raw fallback when incompressible (the RLE worst case exceeds the
-// raw size, so the comparison is strict — equal-or-larger stays raw).
-fn send_chunk(writer: &mut Box<dyn serialport::SerialPort>, id: u16, chunk: usize, bytes: &[u8]) {
-    let enc = rle_encode_565(bytes);
-    let (ty, body): (u8, &[u8]) = if enc.len() < VIDEO_PAYLOAD_MAX {
-        (FRAME_VIDEO_RLE, &enc)
-    } else {
-        (FRAME_VIDEO, bytes)
-    };
-    let mut payload = [0u8; 8 + VIDEO_PAYLOAD_MAX];
-    payload[0..2].copy_from_slice(&id.to_le_bytes());
-    payload[2..4].copy_from_slice(&(chunk as u16).to_le_bytes());
-    payload[4..6].copy_from_slice(&(VIDEO_CHUNKS as u16).to_le_bytes());
-    payload[6..8].copy_from_slice(&(body.len() as u16).to_le_bytes());
-    payload[8..8 + body.len()].copy_from_slice(body);
-    let mut frame = [0u8; 7 + 8 + VIDEO_PAYLOAD_MAX];
-    let n = build_frame(&mut frame, ty, &payload[..8 + body.len()]);
-    let _ = writer.write_all(&frame[..n]);
+// Fragment one JPEG into FRAME_VIDEO frames and write them, spreading the
+// fragments evenly over `interval` instead of bursting the whole image.
+//
+// The spread is not cosmetic: the puck's USB-Serial-JTAG RX FIFO is 64 B, so a
+// burst makes its ISR miss packets and the frame arrives shredded (measured:
+// 10.4 kB every 34 ms lost ~30% of its bytes; the same rate paced per fragment
+// lost none). Fragment i leaves at frame_start + (i+1)*interval/count, so a
+// frame still takes one interval even when encoding ate part of the first
+// slice, and a late fragment just catches up.
+fn send_jpeg<W: Write>(
+    writer: &mut W,
+    id: u16,
+    jpeg: &[u8],
+    frame_start: Instant,
+    interval: Duration,
+) {
+    let count = jpeg.len().div_ceil(VIDEO_FRAG_MAX).max(1);
+    let per_frag = interval / count as u32;
+    let mut payload = [0u8; 8 + VIDEO_FRAG_MAX];
+    let mut frame = [0u8; 7 + FRAME_MAX_PAYLOAD];
+    for (i, part) in jpeg.chunks(VIDEO_FRAG_MAX).enumerate() {
+        payload[0..2].copy_from_slice(&id.to_le_bytes());
+        payload[2..4].copy_from_slice(&(i as u16).to_le_bytes());
+        payload[4..6].copy_from_slice(&(count as u16).to_le_bytes());
+        payload[6..8].copy_from_slice(&(part.len() as u16).to_le_bytes());
+        payload[8..8 + part.len()].copy_from_slice(part);
+        let n = build_frame(&mut frame, FRAME_VIDEO, &payload[..8 + part.len()]);
+        let _ = writer.write_all(&frame[..n]);
+        let due = frame_start + per_frag * (i as u32 + 1);
+        if let Some(left) = due.checked_duration_since(Instant::now()) {
+            thread::sleep(left);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -270,14 +225,24 @@ struct SerialLink {
     pose_rx: crossbeam_channel::Receiver<Pose>,
 }
 
-// Video sender queue to the puck panel over the same CDC port.
-// The sender thread owns a cloned serial handle and paces one chunk per
-// ~833 us at 10 fps; frame_tx is 2-deep so the render thread never blocks
+// Video sender queue to the puck panel over the same CDC port. The render
+// thread only copies the readback and enqueues; encoding, fragmentation and
+// pacing happen on the sender thread. frame_tx is 2-deep and the sender holds a
+// cloned Receiver, so a Full queue means one try_recv discards the older
+// (already stale) frame and the newest still gets through: latency stays under
+// one frame instead of dropping the newest.
 #[derive(Resource)]
 struct VideoTx {
-    frame_tx: SyncSender<Frame>,
+    frame_tx: crossbeam_channel::Sender<Frame>,
+    discard_rx: crossbeam_channel::Receiver<Frame>,
     free_tx: crossbeam_channel::Sender<Box<[u8]>>,
     free_rx: crossbeam_channel::Receiver<Box<[u8]>>,
+    // Frames the render thread had to abandon outright (the queue was still
+    // full after discarding the oldest). Superseded frames are the pacing
+    // mechanism, not a fault, so they are not counted here.
+    dropped: Arc<AtomicU32>,
+    prev: Box<[u8]>, // previous readback, for the static-scene test
+    prev_valid: bool,
     frame_id: u16,
 }
 
@@ -474,34 +439,93 @@ fn setup_scene(
         }
     });
     commands.insert_resource(SerialLink { pose_rx });
-    // Burst sender thread: owns the cloned serial handle, sends only dirty
-    // 2-row chunks with no pacing (native USB bulk needs none).
-    // Fire-and-forget; write errors ignored. Returned buffers recycle
-    // through free_tx so the steady state allocates nothing.
-    let (frame_tx, frame_rx) = sync_channel::<Frame>(2);
+    // JPEG sender thread: owns the cloned serial handle, encodes off the render
+    // thread, fragments, and paces each fragment across the frame interval.
+    // Fire-and-forget; write errors ignored. Returned buffers recycle through
+    // free_tx so the steady state allocates nothing.
+    let (frame_tx, frame_rx) = crossbeam_channel::bounded::<Frame>(2);
+    let discard_rx = frame_rx.clone();
     let (free_tx, free_rx) = crossbeam_channel::unbounded::<Box<[u8]>>();
     let return_tx = free_tx.clone();
+    let dropped = Arc::new(AtomicU32::new(0));
+    let dropped_tx = dropped.clone();
     thread::spawn(move || {
         let mut writer = writer;
-        let mut prev = vec![0u8; VIDEO_FRAME_BYTES];
-        while let Ok(frm) = frame_rx.recv() {
-            let mut dirty = dirty_chunks(&prev, &frm.bytes);
-            prev.copy_from_slice(&frm.bytes);
-            if dirty.is_empty() {
-                dirty.push(0); // heartbeat: keeps device idle timer fresh
+        let mut out: Vec<u8> = Vec::with_capacity(VIDEO_JPEG_MAX);
+        let mut cached: Vec<u8> = Vec::new(); // last frame sent, for the heartbeat
+        let mut cached_id = 0u16;
+        let mut last_sent = Instant::now();
+        let interval = Duration::from_micros(1_000_000 / VIDEO_TARGET_FPS);
+        let mut log_at = Instant::now();
+        let (mut sent, mut big, mut enc_us, mut enc_n) = (0u32, 0u32, 0u64, 0u32);
+        loop {
+            match frame_rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(frm) => {
+                    let frame_start = Instant::now();
+                    out.clear();
+                    let mut enc = jpeg_encoder::Encoder::new(&mut out, JPEG_QUALITY);
+                    enc.set_sampling_factor(jpeg_encoder::SamplingFactor::F_2_2); // 4:2:0
+                    let encoded = enc.encode(
+                        &frm.rgba,
+                        VIDEO_W as u16,
+                        VIDEO_H as u16,
+                        jpeg_encoder::ColorType::Rgba,
+                    );
+                    enc_us += frame_start.elapsed().as_micros() as u64;
+                    enc_n += 1;
+                    let _ = return_tx.send(frm.rgba);
+                    // `big`: frames skipped rather than truncated — an encode
+                    // error, or more bytes than the device will assemble.
+                    if encoded.is_err() || out.len() > VIDEO_JPEG_MAX {
+                        big += 1;
+                    } else {
+                        cached.clear();
+                        cached.extend_from_slice(&out);
+                        cached_id = frm.id;
+                        send_jpeg(&mut writer, frm.id, &out, frame_start, interval);
+                        sent += 1;
+                        last_sent = Instant::now();
+                    }
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    // Static scene: the render thread enqueues nothing, so keep
+                    // the device's idle RGB cycle away with a slow re-send.
+                    if !cached.is_empty()
+                        && last_sent.elapsed() >= Duration::from_millis(VIDEO_HEARTBEAT_MS)
+                    {
+                        send_jpeg(&mut writer, cached_id, &cached, Instant::now(), interval);
+                        last_sent = Instant::now();
+                    }
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
             }
-            for chunk in dirty {
-                let out = &frm.bytes[chunk * VIDEO_PAYLOAD_MAX..(chunk + 1) * VIDEO_PAYLOAD_MAX];
-                send_chunk(&mut writer, frm.id, chunk, out);
+            if log_at.elapsed() >= Duration::from_secs(1) {
+                let enc_ms = if enc_n == 0 {
+                    0.0
+                } else {
+                    enc_us as f64 / enc_n as f64 / 1000.0
+                };
+                println!(
+                    "video {sent} fps drop {} big {big} enc {enc_ms:.1} ms",
+                    dropped_tx.load(Ordering::Relaxed)
+                );
+                sent = 0;
+                big = 0;
+                enc_us = 0;
+                enc_n = 0;
+                log_at = Instant::now();
             }
-            let _ = return_tx.send(frm.bytes);
         }
     });
 
     commands.insert_resource(VideoTx {
         frame_tx,
+        discard_rx,
         free_tx,
         free_rx,
+        dropped,
+        prev: vec![0u8; VIDEO_W * 4 * VIDEO_H].into_boxed_slice(),
+        prev_valid: false,
         frame_id: 0,
     });
     // One persistent readback: the component fires every frame on its own
@@ -509,18 +533,9 @@ fn setup_scene(
     commands.spawn(Readback::texture(target));
 }
 
-// Pack RGBA8 bytes into RGB565 LE words. One frame = 120 chunks x 1280 B
-// from 307200 RGBA8 bytes.
-fn pack_rgb565(dst: &mut [u8], src: &[u8]) {
-    for (d, px) in dst.chunks_exact_mut(2).zip(src.chunks_exact(4)) {
-        let v: u16 = ((px[0] as u16 >> 3) << 11) | ((px[1] as u16 >> 2) << 5) | (px[2] as u16 >> 3);
-        d.copy_from_slice(&v.to_le_bytes());
-    }
-}
-
-// Readback fires when the requested texture copy completes; pack RGB565 into a
-// pooled buffer and hand it to the paced sender thread. Drop-if-behind: when
-// the 2-deep queue is full the frame is returned to the pool instead of
+// Readback fires when the requested texture copy completes. Copy it into a
+// pooled buffer and hand it to the sender thread; an unchanged frame enqueues
+// nothing at all (the sender's heartbeat covers the static scene).
 fn on_video_readback(readback: On<ReadbackComplete>, mut video: ResMut<VideoTx>) {
     let data = &readback.data;
     // Tight-pack invariant: 320*4 = 1280 is a multiple of the 256-byte row
@@ -531,21 +546,36 @@ fn on_video_readback(readback: On<ReadbackComplete>, mut video: ResMut<VideoTx>)
     if data.len() < VIDEO_W * 4 * VIDEO_H {
         return;
     }
+    let src = &data[..VIDEO_W * 4 * VIDEO_H];
+    if video.prev_valid && &video.prev[..] == src {
+        return; // static scene: no buffer taken, nothing enqueued
+    }
     let mut buf = video
         .free_rx
         .try_recv()
-        .unwrap_or_else(|_| vec![0u8; VIDEO_FRAME_BYTES].into_boxed_slice());
-    // One frame = 120 chunks x 1280 RGB565 bytes from 307200 RGBA8 bytes.
-    pack_rgb565(&mut buf, &data[..VIDEO_W * 4 * VIDEO_H]);
+        .unwrap_or_else(|_| vec![0u8; VIDEO_W * 4 * VIDEO_H].into_boxed_slice());
+    buf.copy_from_slice(src);
+    video.prev.copy_from_slice(src);
+    video.prev_valid = true;
     let frame = video.frame_id;
     video.frame_id = frame.wrapping_add(1);
-    match video.frame_tx.try_send(Frame { bytes: buf, id: frame }) {
+    match video.frame_tx.try_send(Frame { rgba: buf, id: frame }) {
         Ok(()) => {}
-        // Sender behind or gone: return the frame buffer to the pool instead
-        // of blocking the render thread.
-        Err(std::sync::mpsc::TrySendError::Full(frm))
-        | Err(std::sync::mpsc::TrySendError::Disconnected(frm)) => {
-            let _ = video.free_tx.send(frm.bytes);
+        // Sender behind: supersede the queued frame — it is already stale by the
+        // time the sender would reach it — and retry, so the newest frame wins
+        // and latency stays under one frame.
+        Err(crossbeam_channel::TrySendError::Full(frm)) => {
+            if let Ok(old) = video.discard_rx.try_recv() {
+                let _ = video.free_tx.send(old.rgba); // recycle: never grow the pool
+            }
+            if let Err(crossbeam_channel::TrySendError::Full(frm)) = video.frame_tx.try_send(frm) {
+                video.dropped.fetch_add(1, Ordering::Relaxed);
+                let _ = video.free_tx.send(frm.rgba);
+            }
+        }
+        // Sender gone (shutdown): return the buffer to the pool.
+        Err(crossbeam_channel::TrySendError::Disconnected(frm)) => {
+            let _ = video.free_tx.send(frm.rgba);
         }
     }
     // Persistent readback entity stays alive — no despawn, no respawn.
@@ -639,114 +669,59 @@ mod tests {
         assert!(!yielded, "corrupted frame must be rejected");
     }
 
-    // Decode mirror of device/src/display/video.h rle_decode_565 (test-only): the same
-    // scheme the sender's rle_encode_565 must invert.
-    fn rle_decode_test(inp: &[u8]) -> Option<Vec<u16>> {
-        let mut out = Vec::new();
-        let mut ip = 0;
-        while ip < inp.len() {
-            let ctrl = inp[ip];
-            ip += 1;
-            let run = if (ctrl & 0x7F) == 0 { 128 } else { (ctrl & 0x7F) as usize };
-            if ctrl & 0x80 != 0 {
-                if ip + 2 > inp.len() {
-                    return None;
-                }
-                let v = u16::from_le_bytes([inp[ip], inp[ip + 1]]);
-                ip += 2;
-                out.extend(std::iter::repeat(v).take(run));
-            } else {
-                if ip + run * 2 > inp.len() {
-                    return None;
-                }
-                for _ in 0..run {
-                    out.push(u16::from_le_bytes([inp[ip], inp[ip + 1]]));
-                    ip += 2;
-                }
-            }
+    // Wire layout of one video fragment, pinned to the same literal bytes the
+    // device-side test (tests/video_test.cpp) asserts: magic, FRAME_VIDEO,
+    // len, 8 B header (frame/frag/count/len, all LE), payload, CRC-16.
+    #[test]
+    fn video_fragment_wire_layout_is_pinned() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&0x1234u16.to_le_bytes()); // frame
+        payload.extend_from_slice(&0u16.to_le_bytes()); // frag
+        payload.extend_from_slice(&2u16.to_le_bytes()); // count
+        payload.extend_from_slice(&3u16.to_le_bytes()); // len
+        payload.extend_from_slice(&[0xAA, 0xBB, 0xCC]);
+        let mut frame = vec![0u8; 7 + payload.len()];
+        let n = build_frame(&mut frame, FRAME_VIDEO, &payload);
+        let mut want = vec![
+            0x55, 0xAA, 0x02, 0x0B, 0x00, // magic, FRAME_VIDEO, len = 11
+            0x34, 0x12, 0x00, 0x00, 0x02, 0x00, 0x03, 0x00, // frame/frag/count/len
+            0xAA, 0xBB, 0xCC, // fragment payload
+        ];
+        let mut crc: u16 = 0xFFFF;
+        for &b in &frame[2..5 + payload.len()] {
+            crc = frame_crc_feed(crc, b);
         }
-        Some(out)
+        want.extend_from_slice(&crc.to_le_bytes());
+        assert_eq!(&frame[..n], &want[..]);
     }
 
-    fn words_le(words: &[u16]) -> Vec<u8> {
-        let mut b = Vec::with_capacity(words.len() * 2);
-        for w in words {
-            b.extend_from_slice(&w.to_le_bytes());
-        }
-        b
-    }
-
+    // Fragments come out in order with the expected lengths, and the parser puts
+    // them back together byte for byte (the device's assembler mirrors this).
     #[test]
-    fn rle_roundtrips_runs_literals_and_boundaries() {
-        // Solid chunk: one 640-word run compresses to 5 runs of 128.
-        let solid = words_le(&vec![0xF800u16; 640]);
-        let enc = rle_encode_565(&solid);
-        // Exact wire bytes: five (0x80, 00 F8) triples — 0 count = 128.
-        let mut expect = Vec::new();
-        for _ in 0..5 {
-            expect.extend_from_slice(&[0x80, 0x00, 0xF8]);
+    fn send_jpeg_fragments_and_the_parser_reassembles_them() {
+        let blob: Vec<u8> = (0..VIDEO_FRAG_MAX * 2 + 17).map(|i| (i * 7) as u8).collect();
+        let mut wire = Vec::new();
+        // Duration::ZERO: nothing to pace against in a test.
+        send_jpeg(&mut wire, 9, &blob, Instant::now(), Duration::ZERO);
+        let mut parser = FrameParser::default();
+        let mut out = vec![0u8; FRAME_MAX_PAYLOAD];
+        let mut hdrs: Vec<(u16, u16, u16, u16)> = Vec::new();
+        let mut got: Vec<u8> = Vec::new();
+        for &b in &wire {
+            let Some((ty, len)) = parser.push(b, &mut out) else {
+                continue;
+            };
+            assert_eq!(ty, FRAME_VIDEO);
+            let h = &out[..len];
+            hdrs.push((
+                u16::from_le_bytes([h[0], h[1]]),
+                u16::from_le_bytes([h[2], h[3]]),
+                u16::from_le_bytes([h[4], h[5]]),
+                u16::from_le_bytes([h[6], h[7]]),
+            ));
+            got.extend_from_slice(&h[8..]);
         }
-        assert_eq!(enc, expect);
-        let dec = rle_decode_test(&enc).expect("solid decodes");
-        assert_eq!(dec, vec![0xF800u16; 640]);
-        // Alternating words: no 3+ run, all literals, strictly larger.
-        let mut alt = Vec::with_capacity(640);
-        for i in 0..640 {
-            alt.push(if i % 2 == 0 { 0x0000u16 } else { 0xFFFFu16 });
-        }
-        let enc_alt = rle_encode_565(&words_le(&alt));
-        assert!(
-            enc_alt.len() >= VIDEO_PAYLOAD_MAX,
-            "incompressible must not shrink"
-        );
-        let dec_alt = rle_decode_test(&enc_alt).expect("alt decodes");
-        assert_eq!(dec_alt, alt);
-        // 128-word boundary: exactly 128 identical words = one run byte.
-        let mut bnd = vec![0x1234u16; 128];
-        bnd.extend((0..512).map(|i| i as u16));
-        let enc_bnd = rle_encode_565(&words_le(&bnd));
-        let dec_bnd = rle_decode_test(&enc_bnd).expect("boundary decodes");
-        assert_eq!(dec_bnd, bnd);
-    }
-
-    #[test]
-    fn pack_ppm_gradient_roundtrip() {
-        // Synthetic 320x240 RGBA8 gradient through pack_rgb565; pins the
-        // RGB565 LE words at four corners.
-        let mut rgba = vec![0u8; VIDEO_W * 4 * VIDEO_H];
-        for y in 0..VIDEO_H {
-            for x in 0..VIDEO_W {
-                let o = (y * VIDEO_W + x) * 4;
-                rgba[o] = (x & 255) as u8;
-                rgba[o + 1] = (y & 255) as u8;
-                rgba[o + 2] = ((x + y) & 255) as u8;
-                rgba[o + 3] = 255;
-            }
-        }
-        let mut out = vec![0u8; VIDEO_FRAME_BYTES];
-        pack_rgb565(&mut out, &rgba[..VIDEO_W * 4 * VIDEO_H]);
-        assert_eq!(out.len(), VIDEO_FRAME_BYTES);
-        let word = |x: usize, y: usize| {
-            let o = (y * VIDEO_W + x) * 2;
-            u16::from_le_bytes([out[o], out[o + 1]])
-        };
-        assert_eq!(word(0, 0), 0x0000);
-        assert_eq!(word(319, 0), 0x3807);
-        assert_eq!(word(0, 239), 0x077D);
-        assert_eq!(word(319, 239), 0x3F65);
-    }
-    #[test]
-    fn dirty_chunks_detects_single_and_spanning_changes() {
-        let base = vec![0x11u8; VIDEO_FRAME_BYTES];
-        assert!(dirty_chunks(&base, &base).is_empty());
-        let mut one = base.clone();
-        one[7 * VIDEO_PAYLOAD_MAX + 100] ^= 0xFF;
-        assert_eq!(dirty_chunks(&base, &one), vec![7]);
-        let mut span = base.clone();
-        span[3 * VIDEO_PAYLOAD_MAX + VIDEO_PAYLOAD_MAX - 1] ^= 0x01;
-        span[4 * VIDEO_PAYLOAD_MAX] ^= 0x01;
-        assert_eq!(dirty_chunks(&base, &span), vec![3, 4]);
-        let all = vec![0x22u8; VIDEO_FRAME_BYTES];
-        assert_eq!(dirty_chunks(&base, &all), (0..VIDEO_CHUNKS).collect::<Vec<_>>());
+        assert_eq!(hdrs, vec![(9, 0, 3, 1280), (9, 1, 3, 1280), (9, 2, 3, 17)]);
+        assert_eq!(got, blob);
     }
 }
