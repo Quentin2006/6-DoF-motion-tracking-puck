@@ -3,14 +3,14 @@
 
 class Display;
 
-// Video RX + panel blit (device/src/display/video_task.cpp), owned by one
-// core-0 task for the life of the firmware. The task owns Serial end to end:
-// after videoTaskStart() nothing else in the sketch may read it or call
-// Serial.begin().
+// Video RX + JPEG decode + panel blit (device/src/display/video_task.cpp),
+// owned by one core-0 task for the life of the firmware. The task owns Serial
+// end to end: after videoTaskStart() nothing else in the sketch may read it or
+// call Serial.begin().
 struct VideoStats {
-  uint32_t frames; // video chunks painted since the last call
-  uint32_t drops;  // reserved for whole-frame loss (0 today)
-  uint32_t bad;    // reserved for rejected frames (0 today)
+  uint32_t frames; // JPEGs decoded and painted since the last call
+  uint32_t drops;  // frames the assembler abandoned (a lost or misordered fragment)
+  uint32_t bad;    // frames JPEGDEC rejected (open, decode, or wrong geometry)
   uint32_t kb;     // Serial RX bytes since the last call, in KiB
 };
 

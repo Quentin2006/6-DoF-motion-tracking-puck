@@ -6,6 +6,7 @@
 #include "display.h"
 #include "frame.h"
 #include "video.h"
+#include <JPEGDEC.h>
 #include <cstring>
 
 namespace {
@@ -18,71 +19,82 @@ Display *gDisplay = nullptr;
 SemaphoreHandle_t gSerialReady = nullptr;
 volatile bool gGo = false;
 
-// One complete FRAME_VIDEO / FRAME_VIDEO_RLE payload -> the chunk's pixel
-// window, keeping the old UsbLink::pollVideoChunk rules: a raw chunk must be
-// exactly VIDEO_PAYLOAD_MAX bytes, an RLE chunk must decode to the whole
-// chunk (decode failure drops it like a CRC reject). `pix` must be 4-byte
-// aligned — Display::chunkInner -> writePixels reads it as 16-bit words.
-bool chunkPixels(uint8_t type, const uint8_t *payload, uint16_t len, VideoChunkHdr &hdr,
-                 uint16_t *pix) {
-  if (!parse_video_header(payload, len, hdr) || hdr.len == 0 ||
-      (size_t)hdr.len + VIDEO_HDR_LEN > len) {
-    return false;
+// All of JPEGDEC's state (including its pixel block buffer) lives in the
+// object, and the assembler holds the JPEG bytes: no heap, no per-frame
+// allocation, nothing to close after openRAM (close() only closes a file
+// handle, and there is none).
+JPEGDEC gJpeg;
+VideoFragAssembler gAsm;
+uint32_t gAsmDropped = 0;
+
+// What the panel is showing right now (RGB565, row-major 320x240). A block is
+// only blitted when it differs from this, which is what keeps the paint rate
+// above the frame rate: the SPI path tops out at ~3.4 MB/s (measured; the
+// Adafruit/ESP32 pixel write is a 64 B polling loop), so a full-frame blit
+// costs ~45 ms and would cap the panel at ~18 fps on its own.
+alignas(4) uint16_t gPanel[VIDEO_W * VIDEO_H];
+bool gPanelValid = false;
+
+// JPEGDEC hands out MCU-aligned blocks (<= 2048 px, so ~45 per frame at
+// 320x240 4:2:0); each one is blitted as its own window. The blit is
+// contiguous, so this relies on iWidthUsed == iWidth — true for the geometry
+// paint() enforces (320x240 is a whole number of 16x16 MCUs, so every block is
+// a clean rectangle).
+int drawBlock(JPEGDRAW *p) {
+  const int w = p->iWidthUsed, h = p->iHeight;
+  bool changed = !gPanelValid;
+  for (int y = 0; y < h && !changed; y++) {
+    const uint16_t *row = gPanel + (size_t)(p->y + y) * VIDEO_W + p->x;
+    changed = memcmp(p->pPixels + (size_t)y * p->iWidth, row, (size_t)w * 2) != 0;
   }
-  if (type == FRAME_VIDEO_RLE) {
-    if (!rle_decode_565(payload + VIDEO_HDR_LEN, hdr.len, pix)) {
-      return false;
-    }
-    hdr.len = VIDEO_PAYLOAD_MAX;
-    return true;
+  if (!changed) {
+    return 1;
   }
-  if (hdr.len != VIDEO_PAYLOAD_MAX || (size_t)hdr.len + VIDEO_HDR_LEN != len) {
-    return false;
+  gDisplay->blitBlock(p->x, p->y, w, h, p->pPixels);
+  for (int y = 0; y < h; y++) {
+    uint16_t *row = gPanel + (size_t)(p->y + y) * VIDEO_W + p->x;
+    memcpy(row, p->pPixels + (size_t)y * p->iWidth, (size_t)w * 2);
   }
-  memcpy(pix, payload + VIDEO_HDR_LEN, hdr.len);
-  return true;
+  gPanelValid = true; // every blitted block is tracked from here on
+  return 1;
 }
 
-// Paint every complete chunk of one read block inside a single SPI
-// transaction. A startWrite/endWrite pair per 1280 B chunk would pay the
-// CS/DC setup 120 times per frame for nothing; the block is whatever the CDC
-// queue had ready.
-void blitBlock(const uint8_t *rx, size_t n, FrameParser &parser, uint16_t *pix, bool &open) {
-  uint8_t payload[FRAME_MAX_PAYLOAD];
-  for (size_t i = 0; i < n; i++) {
-    uint8_t type = 0;
-    uint16_t len = 0;
-    if (!parser.push(rx[i], type, payload, len)) {
-      continue;
-    }
-    if (type != FRAME_VIDEO && type != FRAME_VIDEO_RLE) {
-      continue;
-    }
-    VideoChunkHdr hdr = {};
-    if (!chunkPixels(type, payload, len, hdr, pix)) {
-      continue;
-    }
-    if (!open) {
-      gDisplay->beginBurst();
-      open = true;
-    }
-    gDisplay->chunkInner(hdr, pix, (int)hdr.len);
-    gFrames++;
+// Decode one assembled JPEG straight into the panel, inside a single SPI
+// transaction. Returns false for anything the panel cannot show.
+bool paint(const uint8_t *jpeg, size_t len) {
+  if (gJpeg.openRAM(const_cast<uint8_t *>(jpeg), (int)len, drawBlock) == 0) {
+    return false;
   }
+  // The blit assumes whole MCU blocks: 320x240 is exactly 20x15 16x16 MCUs for
+  // the 4:2:0 the sender emits, so iWidthUsed == iWidth everywhere and every
+  // block is a clean rectangle. Anything else is a sender bug, not a frame.
+  if (gJpeg.getWidth() != VIDEO_W || gJpeg.getHeight() != VIDEO_H) {
+    return false;
+  }
+  gJpeg.setPixelType(RGB565_LITTLE_ENDIAN); // matches Display::blitBlock's word reads
+  // A frame arrived even if nothing needs repainting: that, not the blit, is
+  // what must keep the idle RGB cycle away.
+  gDisplay->markVideo(millis());
+  gDisplay->beginBurst();
+  const int ok = gJpeg.decode(0, 0, 0);
+  gDisplay->endBurst();
+  return ok != 0;
 }
 
 void videoTaskEntry(void *) {
-  // Static and 4-byte aligned: 1280 B of 16-bit words is too much to keep on
-  // the task stack next to the parser's own FRAME_MAX_PAYLOAD buffer.
-  alignas(4) static uint16_t pix[VIDEO_PAYLOAD_MAX / 2];
   uint8_t scratch[1024];
+  uint8_t payload[FRAME_MAX_PAYLOAD];
   FrameParser parser;
-  bool open = false;
 
   // CDC init happens here so its RX interrupt lands on this core (see the
   // header). Grow the RX queue first, or HWCDC::begin creates its 256 B
-  // default and a burst overflows it.
-  Serial.setRxBufferSize(CDC_RX_BYTES);
+  // default and a burst overflows it. A failed grow leaves the link unable to
+  // carry a frame, so fail-stop like setup()'s MPU halt.
+  if (Serial.setRxBufferSize(CDC_RX_BYTES) != CDC_RX_BYTES) {
+    while (true) {
+      delay(1000);
+    }
+  }
   Serial.begin(CDC_BAUD);
   xSemaphoreGive(gSerialReady);
 
@@ -94,24 +106,48 @@ void videoTaskEntry(void *) {
   for (;;) {
     const size_t n = Serial.read(scratch, sizeof scratch);
     if (n == 0) {
-      if (open) {
-        gDisplay->endBurst();
-        open = false;
-      }
       // Nothing queued: yield the core (the CDC ISR and the idle task need
       // it) and let the panel fall back to its RGB cycle — tick self-gates on
       // VIDEO_IDLE_MS, so calling it every idle millisecond is free.
       vTaskDelay(1);
-      gDisplay->tick(millis());
+      if (gDisplay->tick(millis())) {
+        gPanelValid = false;
+      }
       continue;
     }
     gBytes += n;
-    blitBlock(scratch, n, parser, pix, open);
-    if (open) {
-      gDisplay->endBurst();
-      open = false;
+    for (size_t i = 0; i < n; i++) {
+      uint8_t type = 0;
+      uint16_t len = 0;
+      if (!parser.push(scratch[i], type, payload, len)) {
+        continue;
+      }
+      if (type != FRAME_VIDEO) {
+        continue;
+      }
+      VideoFragHdr hdr = {};
+      if (!parse_video_frag_hdr(payload, len, hdr)) {
+        continue;
+      }
+      if (!gAsm.push(hdr, payload + VIDEO_HDR_LEN, hdr.len)) {
+        continue;
+      }
+      // A whole JPEG arrived: decode and paint it before reading on. The RX
+      // queue is sized to hold the next frame's fragments while this runs.
+      if (paint(gAsm.buf(), gAsm.len())) {
+        gFrames++;
+      } else {
+        gBad++;
+      }
     }
-    gDisplay->tick(millis());
+    const uint32_t dropped = gAsm.dropped();
+    gDrops += dropped - gAsmDropped;
+    gAsmDropped = dropped;
+    // The idle RGB cycle repaints the panel behind our back: whatever the
+    // shadow thinks is on screen is wrong from then on.
+    if (gDisplay->tick(millis())) {
+      gPanelValid = false;
+    }
   }
 }
 

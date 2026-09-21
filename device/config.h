@@ -33,10 +33,14 @@ constexpr float EKF_GATE_NORM_FAR = 0.70f; // 2x EKF_GATE_NORM: coast above this
 // baud is a no-op for throughput: the pipe is capped by USB delivery (~512
 // kB/s measured), not by a line rate. The RX queue must be grown before
 // Serial.begin or HWCDC creates its 256 B default — and HWCDC's ISR silently
-// discards whatever does not fit, which is exactly what a video burst does.
-// Both are applied by the video task (src/display/video_task.cpp), on core 0.
+// discards whatever does not fit.
+//
+// It has to hold a whole frame's fragments: the video task decodes and paints
+// one JPEG (~25-30 ms of SPI + decode) before it reads again, and a 320x240
+// q75 frame is 8-15 kB. Both are applied by the video task
+// (src/display/video_task.cpp), on core 0.
 constexpr unsigned long CDC_BAUD = 921600;
-constexpr size_t CDC_RX_BYTES = 4096;
+constexpr size_t CDC_RX_BYTES = 16384;
 
 // ------------------------------- DISPLAY -------------------------------
 // ESP32-S3 pin assignments
@@ -48,7 +52,14 @@ constexpr int TFT_RST = 8;
 constexpr int TFT_BL = 7;
 constexpr int TFT_W = 240;
 constexpr int TFT_H = 320;
-constexpr uint32_t TFT_SPI_FREQ = 62500000; // 62.5 MHz: ST7789VW §7.4.3 Table 6 TSCYCW min 16 ns write cycle; fallback 40 MHz on any tear
+// 62.5 MHz: ST7789VW §7.4.3 Table 6 TSCYCW min 16 ns write cycle. Note the
+// core's integer divider on the 80 MHz APB cannot reach it — any request from
+// 40 to 70 MHz lands on the same divider and yields 40 MHz, measured at
+// 3.38 MB/s of pixels through the polling write path (80 MHz, SPI_CLK_EQU_SYSCLK,
+// measures 5.17 MB/s but is past the panel's write-cycle spec). A full-frame
+// blit is therefore ~45 ms, which is why the video task blits only the blocks
+// that actually changed (src/display/video_task.cpp).
+constexpr uint32_t TFT_SPI_FREQ = 62500000;
 constexpr unsigned long DISPLAY_COLOR_PERIOD_MS = 5000; // solid RGB cycle step
 constexpr unsigned long VIDEO_IDLE_MS = 10000; // RGB cycle takes over after this long with no chunks
 

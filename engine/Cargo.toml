@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 bevy = "0.19.1"
 crossbeam-channel = "0.5"
+jpeg-encoder = "0.7"
 serialport = "4"
 
 # Enable a small amount of optimization in the dev profile.
