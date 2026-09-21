@@ -88,10 +88,12 @@ fn dirty_chunks(prev: &[u8], cur: &[u8]) -> Vec<usize> {
 const PREDICT_TAU_S: f32 = 0.008;
 const SMOOTH_TAU_S: f32 = 0.006;
 
-// Puck serial link @ 921600. The S3 board exposes two USB ports: the native
-// USB (Espressif 303a:1001 — the firmware's CDC `Serial`, where the frames
-// are) and the on-board UART bridge (1a86:55d3 — flash/console only). Attach
-// by VID/PID: the ttyACM index depends on plug order, the VID/PID does not.
+// Puck serial link. The S3 board exposes two USB ports: the USB-Serial-JTAG
+// peripheral (Espressif 303a:1001 — the firmware's CDC `Serial`, where the
+// frames are) and the on-board UART bridge (1a86:55d3 — flash/console only).
+// Attach by VID/PID: the ttyACM index depends on plug order, the VID/PID does
+// not. 921600 is the one baud that also works on the bridge; on USB-JTAG it is
+// a no-op — the pipe is capped by the USB delivery path, not the line rate.
 const PUCK_VID: u16 = 0x303a;
 const PUCK_PID: u16 = 0x1001;
 const SERIAL_BAUD: u32 = 921600;
