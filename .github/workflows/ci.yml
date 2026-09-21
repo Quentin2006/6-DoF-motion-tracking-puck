@@ -44,4 +44,7 @@ jobs:
       - name: Install display libs
         run: arduino-cli lib install "Adafruit GFX Library" "Adafruit ST7735 and ST7789 Library"
       - name: Compile firmware
-        run: arduino-cli compile --fqbn esp32:esp32:esp32s3 device
+        # Same FQBN as the Makefile: the bare board id selects Serial0 (UART0),
+        # while CDCOnBoot=cdc selects the HWCDC paths the repo actually ships
+        # (ARDUINO_USB_MODE=1 / ARDUINO_USB_CDC_ON_BOOT=1).
+        run: arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc device
