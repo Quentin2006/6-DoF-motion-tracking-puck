@@ -1,5 +1,10 @@
 .PHONY: all clean lsp compile upload monitor engine device test
 FQBN ?= esp32:esp32:esp32s3:CDCOnBoot=cdc
+# Firmware port. The puck's own USB port (USB-Serial-JTAG) gets a stable
+# /dev/serial/by-id node whatever order things were plugged in — the ttyACM
+# index does not. Fall back to the historical literal, which is where a
+# bridge-only (1a86:55d3) setup enumerates. Override with PORT=<node>.
+PORT ?= $(firstword $(wildcard /dev/serial/by-id/usb-Espressif_USB_JTAG_*) /dev/ttyACM0)
 
 all: compile upload engine
 clean:
@@ -7,9 +12,9 @@ clean:
 compile:
 	arduino-cli compile --fqbn $(FQBN) device
 upload:
-	arduino-cli upload --fqbn $(FQBN) -p /dev/ttyACM0 device
+	arduino-cli upload --fqbn $(FQBN) -p $(PORT) device
 monitor:
-	arduino-cli monitor device
+	arduino-cli monitor -p $(PORT) device
 device: compile upload monitor
 lsp:
 	arduino-cli compile --clean --fqbn $(FQBN) --only-compilation-database --build-path ./build ./device/
