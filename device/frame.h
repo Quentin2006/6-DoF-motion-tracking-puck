@@ -12,16 +12,12 @@
 // payload only (magic and crc excluded).
 // Pose payload (FRAME_POSE, len == 36) is the exact 36 bytes from
 // build_quat_packet (device/packet.h); video payload (FRAME_VIDEO) is the
-// existing 8-byte video header (device/src/display/video.h) + chunk bytes.
+// 8-byte fragment header (device/src/display/video.h) + JPEG fragment bytes.
 constexpr uint8_t FRAME_MAGIC_0 = 0x55;
 constexpr uint8_t FRAME_MAGIC_1 = 0xAA;
 constexpr uint8_t FRAME_POSE = 0x01;
-constexpr uint8_t FRAME_VIDEO = 0x02;
-// Same 8-byte video header + chunk bytes as FRAME_VIDEO, but the chunk bytes
-// are RLE-compressed (see rle_decode_565 in device/src/display/video.h); hdr.len is the
-// compressed length. Sent when the encoding is strictly smaller than raw.
-constexpr uint8_t FRAME_VIDEO_RLE = 0x03;
-constexpr size_t FRAME_MAX_PAYLOAD = 1288; // largest video payload (8 + 1280)
+constexpr uint8_t FRAME_VIDEO = 0x02; // one JPEG fragment: 8 B header + <= 1280 B
+constexpr size_t FRAME_MAX_PAYLOAD = 1288; // largest payload: 8 + VIDEO_FRAG_MAX
 constexpr size_t FRAME_HDR_LEN = 5;        // magic[2] + type + len[2]
 constexpr size_t FRAME_CRC_LEN = 2;
 
