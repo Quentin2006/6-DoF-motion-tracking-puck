@@ -115,8 +115,8 @@ is editor IntelliSense only — it does not compile or flash.
 
 ```bash
 make compile          # build firmware only: arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc device
-make upload           # flash to /dev/ttyACM0: arduino-cli upload --fqbn $(FQBN) -p /dev/ttyACM0 device
-make monitor          # serial monitor @921600 (uses device/sketch.yaml port/baud)
+make upload           # flash to $(PORT): arduino-cli upload --fqbn $(FQBN) -p $(PORT) device
+make monitor          # serial monitor on $(PORT) @921600 (device/sketch.yaml baud)
 make device           # compile + upload + monitor  (interactive loop)
 make engine           # cd engine && cargo run      (host Bevy visualizer)
 make all              # compile + upload + engine   (full pipeline)
@@ -126,7 +126,7 @@ make test             # cargo test (engine) + host contract tests (packet, frami
 ```
 
 - **FQBN** default `esp32:esp32:esp32s3:CDCOnBoot=cdc` (in `Makefile` `?=` and `device/sketch.yaml`); override with `make compile FQBN=<other>`.
-- **Engine port:** the native-USB puck — selected by USB VID:PID `303a:1001` from `serialport::available_ports()`, because the `ttyACM<n>` index depends on plug order (bridge `1a86:55d3` + native both plugged ⇒ native is not `ttyACM0`). `PUCK_SERIAL` overrides with any explicit node. **Baud** 921600 (native-CDC baud is don't-care). Firmware flash/monitor still uses `Makefile`/`sketch.yaml`'s literal `/dev/ttyACM0` (the UART bridge).
+- **Engine port:** the native-USB puck — selected by USB VID:PID `303a:1001` from `serialport::available_ports()`, because the `ttyACM<n>` index depends on plug order (bridge `1a86:55d3` + native both plugged ⇒ native is not `ttyACM0`). `PUCK_SERIAL` overrides with any explicit node. **Baud** 921600 (native-CDC baud is don't-care). Firmware flash/monitor uses `Makefile`'s `PORT`, which resolves the same way order-independently (`/dev/serial/by-id/usb-Espressif_USB_JTAG_*`) and falls back to the literal `/dev/ttyACM0` (the UART bridge, where a bridge-only setup enumerates); override with `make upload PORT=<node>`.
 - `make engine` from repo root, or `cargo run` from `engine/`.
 - `make lsp` = compile with `--only-compilation-database --build-path ./build`, then a `jq` rewrite that maps `build/sketch/` → `device/`, renames `.ino.cpp` → `.ino`, injects `-x c++` on `.ino` files, and strips `-MMD`/`-o`/object args. The `.clangd` compiler/sysroot override handles toolchain include discovery.
 
