@@ -97,6 +97,17 @@ inline bool parse_video_mask_hdr(const uint8_t *pkt, size_t n, VideoMaskHdr &hdr
   return hdr.tiles == VIDEO_TILES;
 }
 
+// Whether a mask may be applied to the frame it names. A mask describes what
+// changed since the previous frame, so it is only valid when the panel is
+// actually showing that previous frame: the successor of the last painted id,
+// or the same id again (the static-scene heartbeat re-sends the last frame
+// with its own mask). A gap means a frame never reached the panel, so the tiles
+// it changed are stale and the mask's baseline is wrong — the caller repaints
+// the whole canvas instead. Ids wrap at 16 bits.
+inline bool mask_trustworthy(uint16_t frame_id, uint16_t last_painted, bool have_painted) {
+  return have_painted && (frame_id == last_painted || frame_id == (uint16_t)(last_painted + 1));
+}
+
 // Reassemble one JPEG from its fragments (must mirror send_jpeg in
 // engine/src/tracking.rs, which is the producer). Loss poisons a frame: the
 // assembler abandons the rest of it instead of splicing two images together,

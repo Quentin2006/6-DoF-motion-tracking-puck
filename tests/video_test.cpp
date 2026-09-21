@@ -216,6 +216,20 @@ int main() {
     }
   }
 
+  // 10. A mask may only be applied when the panels show the frame it was
+  //     computed against: the last frame, its successor, or the same frame
+  //     again (the heartbeat). A gap means tiles changed in a frame that never
+  //     arrived, so the caller must repaint everything. Ids wrap at 16 bits.
+  {
+    CHECK(!mask_trustworthy(0, 0, false), "nothing painted yet is not a baseline");
+    CHECK(mask_trustworthy(0, 0, true), "heartbeat repeat is a baseline");
+    CHECK(mask_trustworthy(101, 100, true), "successor is a baseline");
+    CHECK(!mask_trustworthy(102, 100, true), "skipped frame is not a baseline");
+    CHECK(!mask_trustworthy(99, 100, true), "older frame is not a baseline");
+    CHECK(mask_trustworthy(0, 0xFFFF, true), "successor across the id wrap");
+    CHECK(!mask_trustworthy(2, 0xFFFF, true), "gap across the id wrap");
+  }
+
   if (failures == 0) {
     std::printf("video_test OK\n");
     return 0;

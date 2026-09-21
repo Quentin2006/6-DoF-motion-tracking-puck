@@ -108,7 +108,11 @@ bytes for one fragment, so a one-sided layout change fails `make test`.
 
 The mask frame and the canvas/tile geometry are canonical there too
 (`VIDEO_W = 640` split into two 320-wide eye halves, 16x16 tiles, 600 tiles,
-75 B of mask; `parse_video_mask_hdr`, `panel_tile_x`). The engine's
+75 B of mask; `parse_video_mask_hdr`, `panel_tile_x`, `mask_trustworthy`). A
+mask is relative to the previous frame, so the device applies it only when the
+panels are showing that frame: the successor of the last painted id, or the
+same id again (the heartbeat). Any gap — a frame lost in transit, or the idle
+RGB cycle having repainted the panels — makes it repaint the whole canvas. The engine's
 `send_mask`/`dirty_mask` are the producer, and
 `tracking.rs::video_mask_wire_layout_is_pinned` + `dirty_mask_covers_exactly_the_changed_tiles`
 assert the same bytes and the same tile-bit mapping as `tests/video_test.cpp`.

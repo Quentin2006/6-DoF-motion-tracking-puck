@@ -44,6 +44,11 @@ const uint8_t *gPaintMask = nullptr;
 // after it must repaint everything: the host's mask is relative to the last
 // frame it sent, not to a colour wheel.
 bool gPaintAll = false;
+// Last frame id that actually reached the panels, so a frame lost in transit
+// (its fragments never completed) can be told apart from the heartbeat's
+// repeat and from the expected successor.
+uint16_t gLastPainted = 0;
+bool gHavePainted = false;
 
 // One 16x16 tile, staged because a JPEGDEC block's rows are iWidth apart while
 // Display::blitTile wants 16 contiguous pixels per row.
@@ -86,11 +91,17 @@ bool paint(const uint8_t *jpeg, size_t len, uint16_t frame_id) {
   if (gJpeg.getWidth() != VIDEO_W || gJpeg.getHeight() != VIDEO_H) {
     return false;
   }
-  // A mask only means anything for the frame it names: a mask from another
-  // frame would repaint the wrong tiles, so a mismatch paints everything and
-  // is counted — a frame painted blind is a real fault, not a slow frame.
-  const bool forced = gPaintAll;
+  // A mask only means anything for the frame it names and only when the panels
+  // are showing the frame it was computed against: a mask from another frame,
+  // or one whose baseline frame never reached the panels, would leave tiles
+  // stale — so anything untrustworthy paints everything.
+  bool forced = gPaintAll;
   gPaintAll = false;
+  if (!mask_trustworthy(frame_id, gLastPainted, gHavePainted)) {
+    forced = true;
+  }
+  gLastPainted = frame_id;
+  gHavePainted = true;
   gPaintMask = (!forced && gMaskValid && gMaskFrame == frame_id) ? gMask : nullptr;
   if (gPaintMask == nullptr && !forced) {
     gNoMask++;
