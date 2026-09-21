@@ -148,6 +148,74 @@ int main() {
     CHECK(asm_.len() == a.size(), "post-abort frame intact");
   }
 
+  // 7. One dirty-tile mask frame's wire bytes, pinned to the literal the Rust
+  //    producer test asserts (tracking.rs::video_mask_wire_layout_is_pinned).
+  {
+    uint8_t payload[4 + VIDEO_MASK_BYTES];
+    payload[0] = 0x34;                          // frame 0x1234
+    payload[1] = 0x12;
+    payload[2] = (uint8_t)(VIDEO_TILES & 0xFF); // tiles, LE
+    payload[3] = (uint8_t)(VIDEO_TILES >> 8);
+    for (size_t i = 0; i < VIDEO_MASK_BYTES; i++) {
+      payload[4 + i] = (uint8_t)i;
+    }
+    uint8_t frame[FRAME_HDR_LEN + sizeof payload + FRAME_CRC_LEN];
+    const size_t n = build_frame(frame, FRAME_VIDEO_MASK, payload, sizeof payload);
+    const uint8_t want[FRAME_HDR_LEN + 4] = {0x55, 0xAA, 0x04, 0x4F, 0x00, // len 79
+                                             0x34, 0x12, 0x58, 0x02};     // frame, tiles 600
+    CHECK(n == sizeof frame, "mask frame length");
+    CHECK(memcmp(frame, want, sizeof want) == 0, "mask header bytes");
+    CHECK(memcmp(frame + FRAME_HDR_LEN + 4, payload + 4, VIDEO_MASK_BYTES) == 0, "mask bytes");
+    uint16_t crc = 0xFFFF;
+    for (size_t i = 2; i < FRAME_HDR_LEN + sizeof payload; i++) {
+      crc = frame_crc_feed(crc, frame[i]);
+    }
+    CHECK(frame[FRAME_HDR_LEN + sizeof payload] == (uint8_t)(crc & 0xFF) &&
+              frame[FRAME_HDR_LEN + sizeof payload + 1] == (uint8_t)(crc >> 8),
+          "mask CRC over type+len+payload");
+  }
+
+  // 8. The mask parser takes one full mask for this canvas and nothing else: a
+  //    partial mask would leave tiles undefined and silently under-paint.
+  {
+    CHECK(VIDEO_TILES == 600 && VIDEO_MASK_BYTES == 75, "mask geometry");
+    uint8_t payload[4 + VIDEO_MASK_BYTES] = {};
+    payload[0] = 0x34;
+    payload[1] = 0x12;
+    payload[2] = (uint8_t)(VIDEO_TILES & 0xFF);
+    payload[3] = (uint8_t)(VIDEO_TILES >> 8);
+    VideoMaskHdr h = {};
+    CHECK(parse_video_mask_hdr(payload, sizeof payload, h), "full mask accepted");
+    CHECK(h.frame == 0x1234 && h.tiles == VIDEO_TILES, "mask header fields");
+    CHECK(!parse_video_mask_hdr(payload, sizeof payload - 1, h), "short mask rejected");
+    payload[2] = (uint8_t)((VIDEO_TILES - 1) & 0xFF);
+    payload[3] = (uint8_t)((VIDEO_TILES - 1) >> 8);
+    CHECK(!parse_video_mask_hdr(payload, sizeof payload, h), "under-count rejected");
+    payload[2] = (uint8_t)((VIDEO_TILES + 1) & 0xFF);
+    payload[3] = (uint8_t)((VIDEO_TILES + 1) >> 8);
+    CHECK(!parse_video_mask_hdr(payload, sizeof payload, h), "over-count rejected");
+    // A 4-byte payload is the real hazard: reading the mask anyway would run
+    // past the object, which ASAN turns into a stack-buffer-overflow.
+    uint8_t tiny[4] = {};
+    CHECK(!parse_video_mask_hdr(tiny, sizeof tiny, h), "header-only payload rejected");
+  }
+
+  // 9. Tile-column routing: which panel a canvas column lands on, and where in
+  //    that panel. The device blit uses this to pick the chip select.
+  {
+    int local = -1;
+    CHECK(panel_tile_x(0, &local) == 0 && local == 0, "col 0 -> panel 0 x 0");
+    CHECK(panel_tile_x(19, &local) == 0 && local == 304, "col 19 -> panel 0 x 304");
+    CHECK(panel_tile_x(20, &local) == 1 && local == 0, "col 20 -> panel 1 x 0");
+    CHECK(panel_tile_x(39, &local) == 1 && local == 304, "col 39 -> panel 1 x 304");
+    CHECK(panel_tile_x(40, &local) == -1, "col 40 out of range");
+    CHECK(panel_tile_x(-1, &local) == -1, "negative column out of range");
+    for (int c = 0; c < (int)(VIDEO_W / VIDEO_TILE); c++) {
+      const int p = panel_tile_x(c, &local);
+      CHECK(p == c / 20 && local == (c % 20) * (int)VIDEO_TILE, "routing covers the canvas");
+    }
+  }
+
   if (failures == 0) {
     std::printf("video_test OK\n");
     return 0;

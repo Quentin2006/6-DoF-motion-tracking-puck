@@ -8,7 +8,9 @@ EKF, and streams the pose as framed CDC-serial packets (~250 Hz) to a
 Rust/Bevy desktop engine. The engine opens the puck serial port, parses the
 frames, and drives a **look-around camera rig** — the puck's orientation maps
 directly to camera rotation, so the user moves the puck and the 3D view
-follows.
+follows. The rig carries **two eye cameras** (parallel stereo, `IPD_M` apart)
+that render into the two halves of a 640x240 target, and the engine streams
+that stereo pair back down the same port to the headset's two panels.
 
 Two independent halves, no shared code, wired together by a single root
 `Makefile` and hand-maintained constant agreement:
@@ -40,15 +42,23 @@ Two independent halves, no shared code, wired together by a single root
 Video runs the other way down the same port, at its own pace:
 
 ```
- Bevy 320x240 RGBA render target → readback → jpeg-encoder q75 4:2:0 (~8-15 kB/frame)
+ Bevy 640x240 RGBA render target = stereo pair (left eye | right eye viewports)
+   │  readback → host-side 600-tile dirty mask (16x16 px tiles = 75 B)
+   │  jpeg-encoder q75 4:2:0, one JPEG for both eyes
+   │  FRAME_VIDEO_MASK frame: 4 B header (frame/tiles) + 75 B mask
    │  FRAME_VIDEO fragment: 8 B header (frame/frag/count/len) + <= 1280 B JPEG
    │  one fragment per slice of the 33 ms frame (never a burst: the USJ RX FIFO is 64 B)
    ▼
  device/src/display/video_task.cpp  (core-0 task)
-   │  VideoFragAssembler → JPEGDEC → Display::blitBlock per MCU block
+   │  VideoFragAssembler → JPEGDEC → Display::blitTile per dirty 16x16 tile
    ▼
- ST7789 panel @ ~30 fps
+ two ST7789 panels, one per eye (CS=10 left, CS=13 right) @ ~30 fps
 ```
+
+The dirty mask is what keeps 30 fps possible: a full both-panel blit costs
+2x153600 B at the measured 3.38 MB/s SPI rate = 90.8 ms (9 fps). The device
+cannot compute dirtiness itself — two 320x240 RGB565 shadows are 307 KB against
+82 KB free — so the host sends the changed-tile set instead.
 
 **Key modules (`device/`)**
 
@@ -62,9 +72,9 @@ Video runs the other way down the same port, at its own pace:
 | `src/position/still_detect.{h,cpp}` | `StillDetector` — gyro re-bias while stationary (50-tick window, variance/norm gates) |
 | `link.{h,cpp}` | USB-CDC pose-out link (`Serial`): FRAME_POSE frames, sequence counter |
 | `frame.h` | Framed CDC byte-stream contract (magic/type/len/CRC) — host-compilable, parsed by `link.cpp`/`video_task.cpp` and `engine/src/tracking.rs` |
-| `src/display/display.{h,cpp}` | ST7789 panel: MCU-block blit, burst transaction, idle RGB cycle |
-| `src/display/video_task.{h,cpp}` | Core-0 task owning the whole Serial path: CDC init (so its RX interrupt runs on core 0), JPEG fragment reassembly, JPEGDEC decode + panel blit, 1 Hz `vid/drop/bad/kb` counters |
-| `src/display/video.h` | Video wire contract: JPEG fragment header + `VideoFragAssembler` — host-compilable, mirrored by `engine/src/tracking.rs` |
+|`src/display/display.{h,cpp}`|Two-panel ST7789 driver: `blitTile` routes a canvas tile to the panel that owns its column (`panel_tile_x`, per-panel CS), one shared SPI transaction per frame, idle RGB cycle on both panels|
+|`src/display/video_task.{h,cpp}`|Core-0 task owning the whole Serial path: CDC init (so its RX interrupt runs on core 0), dirty-mask state, JPEG fragment reassembly, JPEGDEC decode + tile blit, 1 Hz `vid/drop/bad/nomask/kb` counters|
+|`src/display/video.h`|Video wire contract: stereo canvas geometry, the dirty-tile mask frame + `parse_video_mask_hdr`, `panel_tile_x` routing, the JPEG fragment header + `VideoFragAssembler` — host-compilable, mirrored by `engine/src/tracking.rs`|
 | `packet.h` | Canonical 36 B pose payload + `build_quat_packet()` — host-compilable, single source of the byte contract |
 
 **Key module (`engine/`)**
@@ -72,21 +82,28 @@ Video runs the other way down the same port, at its own pace:
 | File | Role |
 |---|---|
 | `src/main.rs` | `App::new().add_plugins(DefaultPlugins).add_plugins(TrackPlugin).run()` |
-| `src/tracking.rs` | All behavior: `SerialLink`/`VideoTx` resources, `LookRig` marker, `TrackPlugin`, `update` ECS system, serial reader + MJPEG encode/fragment/paced sender threads |
+|`src/tracking.rs`|All behavior: `SerialLink`/`VideoTx` resources, `LookRig` marker with two viewport eye cameras (IPD), `TrackPlugin`, `update` ECS system, serial reader + dirty-mask/MJPEG encode/fragment/paced sender threads|
 
 **Cross-file wire contract (edit both halves together).** `device/frame.h`,
 `device/packet.h`, `device/src/display/video.h` and `engine/src/tracking.rs`
 hard-code the same framed-CDC protocol by hand; there is no shared crate or
 serializer. The 36-byte pose payload (`QUAT_PACKET_LEN_V2`) inside a
-`FRAME_POSE` frame, and the 320×240 baseline-JPEG video fragments (`VIDEO_*`),
-**must match in both halves**. Both x86 and ESP32 are little-endian, so no
-byte-swapping is done.
+`FRAME_POSE` frame, the `FRAME_VIDEO_MASK` dirty-tile mask, and the 640×240
+baseline-JPEG stereo-pair fragments (`VIDEO_*`), **must match in both halves**.
+Both x86 and ESP32 are little-endian, so no byte-swapping is done.
 
 The fragment layout is **canonical in `device/src/display/video.h`**
 (`VideoFragAssembler`, host-compilable, no Arduino deps; the engine's
 `send_jpeg` is the producer). `tests/video_test.cpp` and
 `tracking.rs::video_fragment_wire_layout_is_pinned` assert the same literal
 bytes for one fragment, so a one-sided layout change fails `make test`.
+
+The mask frame and the canvas/tile geometry are canonical there too
+(`VIDEO_W = 640` split into two 320-wide eye halves, 16x16 tiles, 600 tiles,
+75 B of mask; `parse_video_mask_hdr`, `panel_tile_x`). The engine's
+`send_mask`/`dirty_mask` are the producer, and
+`tracking.rs::video_mask_wire_layout_is_pinned` + `dirty_mask_covers_exactly_the_changed_tiles`
+assert the same bytes and the same tile-bit mapping as `tests/video_test.cpp`.
 
 The packet byte layout is **canonical in `device/packet.h`**
 (`build_quat_packet`, host-compilable, no Arduino deps); `link.cpp`
@@ -101,7 +118,7 @@ edit fails `make test`.
 
 - `device/` — ESP32-S3 Arduino sketch (source of truth for firmware).
 - `engine/` — Rust Bevy visualizer (`src/main.rs`, `src/tracking.rs`).
-- `tests/` — cross-contract tests: `packet_fixture.txt` (shared golden bytes), `packet_test.cpp` (C++ producer vs fixture), `frame_test.cpp` (framing/CRC/desync), `video_test.cpp` (JPEG fragment contract, ASAN).
+- `tests/` — cross-contract tests: `packet_fixture.txt` (shared golden bytes), `packet_test.cpp` (C++ producer vs fixture), `frame_test.cpp` (framing/CRC/desync), `video_test.cpp` (JPEG fragment + dirty-mask/tile-routing contract, ASAN).
 - `.github/` — CI (`workflows/ci.yml`): engine `cargo test` + device `arduino-cli compile`.
 - `build/` — arduino-cli output incl. raw `build/compile_commands.json` (gitignored).
 - Root datasheets `ST7789VW.PDF` (display), `MPU-6000.PDF` (IMU) — reference only.
@@ -122,7 +139,7 @@ make engine           # cd engine && cargo run      (host Bevy visualizer)
 make all              # compile + upload + engine   (full pipeline)
 make clean            # arduino-cli compile --clean --fqbn $(FQBN) device
 make lsp              # regenerate + rewrite compile_commands.json for clangd
-make test             # cargo test (engine) + host contract tests (packet, framing, video fragments)
+make test             # cargo test (engine) + host contract tests (packet, framing, video fragments + dirty mask)
 ```
 
 - **FQBN** default `esp32:esp32:esp32s3:CDCOnBoot=cdc` (in `Makefile` `?=` and `device/sketch.yaml`); override with `make compile FQBN=<other>`.
@@ -150,8 +167,8 @@ make test             # cargo test (engine) + host contract tests (packet, frami
 - `device/config.h` — every compile-time constant and the wire-contract sizes. The file any hardware/fusion change lands in.
 - `device/packet.h` — canonical 36 B pose payload + `build_quat_packet()`; the byte contract's single source (host-testable).
 - `device/frame.h` — framed-CDC contract (magic/type/len/CRC + `FrameParser`); parsed by `video_task.cpp` and the engine reader.
-- `device/src/display/video.h` — the JPEG fragment layout + `VideoFragAssembler`; the video wire contract's single source (host-testable).
-- `device/src/display/video_task.cpp` — the only `Serial` reader and the only panel writer: core-0 RX, JPEG reassembly/decode, blit.
+- `device/src/display/video.h` — the stereo canvas/tile geometry, the dirty-mask frame + parser, `panel_tile_x`, and the JPEG fragment layout + `VideoFragAssembler`; the video wire contract's single source (host-testable).
+- `device/src/display/video_task.cpp` — the only `Serial` reader and the only panel writer: core-0 RX, dirty-mask state, JPEG reassembly/decode, per-tile blit.
 - `device/device.ino` — the boot + loop sequencing (init → calib → CAL6 gate → start → stream).
 - `device/src/position/tracker.cpp` — the per-tick pipeline (scheduler, axis remap, still-detect nudge, EKF predict/update, display-quat wrap).
 - `engine/src/tracking.rs` — the packet parser, prediction/smoothing, MJPEG sender (encode → fragment → paced write), and camera rig.
@@ -212,11 +229,16 @@ verification stays manual.
      packet with `build_quat_packet` and assert the bytes equal the same fixture
      (producer half). A framing test (`tests/frame_test.cpp`) covers garbage
      recovery, CRC rejection, split reassembly, and magic-in-payload.
-  3. **Video fragment test** (`tests/video_test.cpp`, host `g++` + ASAN) — the
-     assembler's ordering/loss/cap rules and the pinned wire bytes of one
-     `FRAME_VIDEO` fragment, which the Rust test
-     (`tracking.rs::video_fragment_wire_layout_is_pinned`) asserts as the same
-     literal. ASAN is what makes "never writes past the assembly buffer" real.
+  3. **Video test** (`tests/video_test.cpp`, host `g++` + ASAN) — the
+     assembler's ordering/loss/cap rules, the pinned wire bytes of one
+     `FRAME_VIDEO` fragment and of one `FRAME_VIDEO_MASK` mask frame, the mask
+     parser's accept/reject rules, and the `panel_tile_x` routing. The Rust
+     tests (`video_fragment_wire_layout_is_pinned`,
+     `video_mask_wire_layout_is_pinned`,
+     `dirty_mask_covers_exactly_the_changed_tiles`) assert the same literals
+     and the same tile-bit mapping from the producer side. ASAN is what makes
+     "never writes past the assembly buffer" — and "never reads past a short
+     mask payload" — real.
   Both packet halves read the **same** `tests/packet_fixture.txt`, so a one-sided
   layout change fails its own test. Needs a host `g++` (not required to flash
   firmware).
@@ -234,6 +256,10 @@ verification stays manual.
   gyro while still. The onboard LED goes red→green once streaming; the 1 Hz
 - **Host render:** `make engine` opens the puck serial port (native USB
   `303a:1001` @921600, or `PUCK_SERIAL=<port>` to pin one) and renders the rig.
+  Engine side: `video 30 fps drop 0 big 0 enc <2 ms` (two eye encodes per
+  stereo frame). Device side (1 Hz, on the same port): `vid 30 drop 0 bad 0
+  nomask 0 kb ~120`. `nomask > 0` means a frame was painted without its
+  dirty-tile mask — every tile repainted, a real fault.
 
 There is **no** unit coverage for `Ekf6Dof`, `StillDetector`, or `Mpu6050` — they
 are hardware-coupled and the serial/calibration path is their real test. Add a
