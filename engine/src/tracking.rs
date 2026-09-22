@@ -20,8 +20,8 @@ const PACKET_LEN: usize = 36;
 const FRAME_MAGIC_0: u8 = 0x55;
 const FRAME_MAGIC_1: u8 = 0xAA;
 const FRAME_POSE: u8 = 0x01;
-const FRAME_VIDEO: u8 = 0x02; // one JPEG fragment: 8 B header + <= 1280 B
-const FRAME_VIDEO_MASK: u8 = 0x04; // dirty-tile mask for one frame: 4 B header + 75 B
+const FRAME_VIDEO: u8 = 0x02; // one blob fragment: 8 B header + <= 1280 B
+const FRAME_VIDEO_RECT: u8 = 0x05; // the frame's dirty rectangles: 4 + 11*rects B
 const FRAME_MAX_PAYLOAD: usize = 1288; // 8 + VIDEO_FRAG_MAX
 
 // Transport+render delay extrapolated from packet gyro, and display smoothing.
@@ -38,63 +38,113 @@ const PUCK_VID: u16 = 0x303a;
 const PUCK_PID: u16 = 0x1001;
 const SERIAL_BAUD: u32 = 921600;
 
-// Video stream to the puck: one 640x240 baseline JPEG per frame holding the
-// stereo pair (left eye | right eye, side by side), fragmented into
-// FRAME_VIDEO frames and preceded by a FRAME_VIDEO_MASK frame naming the tiles
-// that changed. Must match device/src/display/video.h VIDEO_* constants.
+// Video stream to the puck: the stereo pair as one or two baseline JPEGs
+// covering only the rectangles that changed, fragmented into FRAME_VIDEO
+// frames and preceded by a FRAME_VIDEO_RECT frame with the rectangle table.
+// Must match device/src/display/video.h VIDEO_* constants.
+//
+// Decoding the whole 640x240 canvas every frame costs the device ~17 ms of
+// JPEGDEC (pixel-bound: measured, and quality does not move it), which capped
+// the panel near 31 fps no matter how little of the frame differed. Sending
+// only the dirty rectangles drops that to ~1 ms for a typical frame, leaving
+// the dirty-area SPI blit as the cost.
 const VIDEO_W: usize = 640;
 const VIDEO_H: usize = 240;
-const VIDEO_PANEL_W: usize = 320; // one panel's half of the canvas
+const VIDEO_PANEL_W: usize = 320; // one panel's half of the canvas, i.e. one eye
 const VIDEO_TILE: usize = 16; // tile grid == the 4:2:0 MCU the device decodes
-const VIDEO_TILES: usize = (VIDEO_W / VIDEO_TILE) * (VIDEO_H / VIDEO_TILE);
-const VIDEO_MASK_BYTES: usize = VIDEO_TILES.div_ceil(8);
+const VIDEO_RECTS_MAX: usize = 2; // one rectangle per eye, at most
+const VIDEO_RECT_LEN: usize = 11; // eye u8 | x,y,w,h u16 LE | jpeg_len u16 LE
 const VIDEO_FRAG_MAX: usize = 1280; // JPEG bytes per fragment; 8 + this = FRAME_MAX_PAYLOAD
-const VIDEO_JPEG_MAX: usize = 49152; // device assembly buffer, and the largest frame accepted
+const VIDEO_JPEG_MAX: usize = 16384; // device assembly buffer, and the largest blob accepted
 const JPEG_QUALITY: u8 = 75; // the one knob trading fidelity for frame rate
-// The device's cost per stereo frame is ~30-34 ms (JPEGDEC decode ~20 ms for
-// 640x240, dirty-tile blit ~6 ms, fragment parse ~8 ms), so 30 fps left the RX
-// queue pinned at its 16 KB ceiling and the resulting byte loss cost 2-7
-// frames/s (measured on the puck). 25 fps is the sanctioned fallback: a 40 ms
-// budget against that cost, with the panel running at 25.
-const VIDEO_TARGET_FPS: u64 = 25;
+const VIDEO_TARGET_FPS: u64 = 40;
 const VIDEO_HEARTBEAT_MS: u64 = 2000; // static scene: re-send so the device stays in video mode
+// Re-send the whole canvas at least this often, changed or not. With rectangles
+// the device holds no full-canvas pixels, so this is the only repair for panels
+// it repainted itself (the idle RGB cycle) and for whatever a lost frame left
+// stale. 2 s bounds both, and a full frame costs one still-cheap no-dirty-area
+// send.
+const VIDEO_KEYFRAME_MS: u64 = 2000;
 
 // Eye separation, matched to the panel/lens spacing: the eyes sit at -IPD_M/2
 // and +IPD_M/2. It is the only stereo-geometry knob — both eyes keep Bevy's
 // default fov and get their 4:3 aspect from their own viewport.
 const IPD_M: f32 = 0.064;
 
+// One dirty rectangle of one eye, in eye-local coordinates, 16-px aligned on
+// every side (a whole number of 4:2:0 MCUs, and of the device's tiles).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Rect {
+    eye: u8,
+    x: u16,
+    y: u16,
+    w: u16,
+    h: u16,
+}
+
 struct Frame {
     rgba: Box<[u8]>, // VIDEO_W x VIDEO_H RGBA8 readback, pooled
-    // Dirty tiles relative to the previous frame, computed here because the
-    // device has no room for a shadow (two 320x240 RGB565 shadows are 307 KB
-    // against 82 KB free). 75 B a frame buys back the ~91 ms a full both-panel
-    // blit would cost, which is the difference between 9 fps and 30.
-    mask: [u8; VIDEO_MASK_BYTES],
+    // Exactly what changed, per eye, computed here because the device has no
+    // room for a shadow (two 320x240 RGB565 shadows are 307 KB against 82 KB
+    // free) and no way to decode less than it is sent. Empty (rects_n == 0)
+    // means the frame is identical to the previous one.
+    rects: [Rect; VIDEO_RECTS_MAX],
+    rects_n: usize,
     id: u16,
 }
 
-// Dirty tiles between two RGBA readbacks: a tile is dirty if any of its
-// VIDEO_TILE rows differs by a byte. 600 tiles x 16 rows = 9600 memcmps of
-// 64 B per frame, ~1% of a core, against the SPI cost of painting blind.
-fn dirty_mask(cur: &[u8], prev: &[u8]) -> [u8; VIDEO_MASK_BYTES] {
-    const COLS: usize = VIDEO_W / VIDEO_TILE;
+// Bounding box of the changed tiles of each eye, or both whole panels when
+// `full`. A tile is dirty when any of its VIDEO_TILE rows differs by a byte:
+// 600 tiles x 16 rows = 9600 memcmps of 64 B, ~1% of a core, against a decode
+// and blit cost that is proportional to what it paints.
+fn dirty_rects(cur: &[u8], prev: &[u8], full: bool) -> ([Rect; VIDEO_RECTS_MAX], usize) {
+    const COLS: usize = VIDEO_PANEL_W / VIDEO_TILE;
+    const ROWS: usize = VIDEO_H / VIDEO_TILE;
     let row_bytes = VIDEO_W * 4;
-    let mut mask = [0u8; VIDEO_MASK_BYTES];
-    for ty in 0..VIDEO_H / VIDEO_TILE {
-        for tx in 0..COLS {
-            let x = tx * VIDEO_TILE * 4;
-            let dirty = (0..VIDEO_TILE).any(|y| {
-                let off = (ty * VIDEO_TILE + y) * row_bytes + x;
-                cur[off..off + VIDEO_TILE * 4] != prev[off..off + VIDEO_TILE * 4]
-            });
-            if dirty {
-                let t = ty * COLS + tx;
-                mask[t >> 3] |= 1 << (t & 7);
+    let whole = Rect {
+        eye: 0,
+        x: 0,
+        y: 0,
+        w: VIDEO_PANEL_W as u16,
+        h: VIDEO_H as u16,
+    };
+    let mut rects = [whole; VIDEO_RECTS_MAX];
+    if full {
+        rects[0].eye = 0;
+        rects[1].eye = 1;
+        return (rects, 2);
+    }
+    let mut n = 0;
+    for eye in 0..2 {
+        let (mut min_tx, mut max_tx) = (COLS, 0);
+        let (mut min_ty, mut max_ty) = (ROWS, 0);
+        for ty in 0..ROWS {
+            for tx in 0..COLS {
+                let x = (eye * VIDEO_PANEL_W + tx * VIDEO_TILE) * 4;
+                let dirty = (0..VIDEO_TILE).any(|y| {
+                    let off = (ty * VIDEO_TILE + y) * row_bytes + x;
+                    cur[off..off + VIDEO_TILE * 4] != prev[off..off + VIDEO_TILE * 4]
+                });
+                if dirty {
+                    min_tx = min_tx.min(tx);
+                    max_tx = max_tx.max(tx);
+                    min_ty = min_ty.min(ty);
+                    max_ty = max_ty.max(ty);
+                }
             }
         }
+        if min_tx <= max_tx {
+            rects[n] = Rect {
+                eye: eye as u8,
+                x: (min_tx * VIDEO_TILE) as u16,
+                y: (min_ty * VIDEO_TILE) as u16,
+                w: ((max_tx - min_tx + 1) * VIDEO_TILE) as u16,
+                h: ((max_ty - min_ty + 1) * VIDEO_TILE) as u16,
+            };
+            n += 1;
+        }
     }
-    mask
+    (rects, n)
 }
 
 fn frame_crc_feed(mut crc: u16, b: u8) -> u16 {
@@ -131,41 +181,64 @@ fn build_frame(out: &mut [u8], ty: u8, payload: &[u8]) -> usize {
     5 + payload.len() + 2
 }
 
-// Send one frame's dirty-tile mask. It must land before the fragments it
-// describes: the device paints the frame the mask names, and falls back to a
-// full both-panel repaint (~91 ms, and its `nomask` counter rises) when the
-// mask is missing or names another frame.
-fn send_mask<W: Write>(writer: &mut W, id: u16, mask: &[u8; VIDEO_MASK_BYTES]) {
-    let mut payload = [0u8; 4 + VIDEO_MASK_BYTES];
+// Send the rectangle table for one frame. It must land before the blob's
+// fragments: the device paints the rectangles the table names, and drops a
+// table it cannot paint (a rect past the panel edge, off the MCU grid, or
+// whose lengths do not add up to the blob) rather than guess.
+fn send_rects<W: Write>(writer: &mut W, id: u16, rects: &[Rect], lens: &[usize]) {
+    let n = rects.len();
+    let mut payload = [0u8; 4 + VIDEO_RECT_LEN * VIDEO_RECTS_MAX];
     payload[0..2].copy_from_slice(&id.to_le_bytes());
-    payload[2..4].copy_from_slice(&(VIDEO_TILES as u16).to_le_bytes());
-    payload[4..].copy_from_slice(mask);
-    let mut frame = [0u8; 7 + 4 + VIDEO_MASK_BYTES];
-    let n = build_frame(&mut frame, FRAME_VIDEO_MASK, &payload);
+    payload[2..4].copy_from_slice(&(n as u16).to_le_bytes());
+    for (i, (r, len)) in rects.iter().zip(lens).enumerate() {
+        let o = 4 + i * VIDEO_RECT_LEN;
+        payload[o] = r.eye;
+        payload[o + 1..o + 3].copy_from_slice(&r.x.to_le_bytes());
+        payload[o + 3..o + 5].copy_from_slice(&r.y.to_le_bytes());
+        payload[o + 5..o + 7].copy_from_slice(&r.w.to_le_bytes());
+        payload[o + 7..o + 9].copy_from_slice(&r.h.to_le_bytes());
+        payload[o + 9..o + 11].copy_from_slice(&(*len as u16).to_le_bytes());
+    }
+    let mut frame = [0u8; 7 + 4 + VIDEO_RECT_LEN * VIDEO_RECTS_MAX];
+    let n = build_frame(&mut frame, FRAME_VIDEO_RECT, &payload[..4 + rects.len() * VIDEO_RECT_LEN]);
     let _ = writer.write_all(&frame[..n]);
 }
 
-// Fragment one JPEG into FRAME_VIDEO frames and write them, spreading the
-// fragments evenly over `interval` instead of bursting the whole image.
+// Copy one rectangle out of the readback, RGBA rows packed tight, ready for the
+// encoder. `out` must hold exactly w*h*4 bytes.
+fn crop_rgba(out: &mut [u8], rgba: &[u8], r: &Rect) {
+    let (w, h) = (r.w as usize, r.h as usize);
+    let row_bytes = VIDEO_W * 4;
+    let left = r.eye as usize * VIDEO_PANEL_W + r.x as usize; // canvas column
+    for row in 0..h {
+        let src = (r.y as usize + row) * row_bytes + left * 4;
+        out[row * w * 4..(row + 1) * w * 4].copy_from_slice(&rgba[src..src + w * 4]);
+    }
+}
+
+// Fragment the blob into FRAME_VIDEO frames and write them, spreading the
+// fragments over the frame interval instead of bursting the whole image.
 //
 // The spread is not cosmetic: the puck's USB-Serial-JTAG RX FIFO is 64 B, so a
 // burst makes its ISR miss packets and the frame arrives shredded (measured:
 // 10.4 kB every 34 ms lost ~30% of its bytes; the same rate paced per fragment
-// lost none). Fragment i leaves at frame_start + (i+1)*interval/count, so a
-// frame still takes one interval even when encoding ate part of the first
-// slice, and a late fragment just catches up.
-fn send_jpeg<W: Write>(
+// lost none). Fragment i leaves at frame_start + i*interval/count, so the first
+// piece of the frame goes out immediately — a rectangle frame is one fragment
+// most of the time, and waiting an interval for it would be a whole frame of
+// latency for nothing — and the last one lands on the grid point the caller
+// paced the frame on.
+fn send_blob<W: Write>(
     writer: &mut W,
     id: u16,
-    jpeg: &[u8],
+    blob: &[u8],
     frame_start: Instant,
     interval: Duration,
 ) {
-    let count = jpeg.len().div_ceil(VIDEO_FRAG_MAX).max(1);
+    let count = blob.len().div_ceil(VIDEO_FRAG_MAX).max(1);
     let per_frag = interval / count as u32;
     let mut payload = [0u8; 8 + VIDEO_FRAG_MAX];
     let mut frame = [0u8; 7 + FRAME_MAX_PAYLOAD];
-    for (i, part) in jpeg.chunks(VIDEO_FRAG_MAX).enumerate() {
+    for (i, part) in blob.chunks(VIDEO_FRAG_MAX).enumerate() {
         payload[0..2].copy_from_slice(&id.to_le_bytes());
         payload[2..4].copy_from_slice(&(i as u16).to_le_bytes());
         payload[4..6].copy_from_slice(&(count as u16).to_le_bytes());
@@ -173,7 +246,7 @@ fn send_jpeg<W: Write>(
         payload[8..8 + part.len()].copy_from_slice(part);
         let n = build_frame(&mut frame, FRAME_VIDEO, &payload[..8 + part.len()]);
         let _ = writer.write_all(&frame[..n]);
-        let due = frame_start + per_frag * (i as u32 + 1);
+        let due = frame_start + per_frag * i as u32;
         if let Some(left) = due.checked_duration_since(Instant::now()) {
             thread::sleep(left);
         }
@@ -302,6 +375,7 @@ struct VideoTx {
     dropped: Arc<AtomicU32>,
     prev: Box<[u8]>, // previous readback, for the static-scene test
     prev_valid: bool,
+    full_at: Instant, // when the last whole-canvas frame went out
     frame_id: u16,
 }
 
@@ -525,55 +599,90 @@ fn setup_scene(
     thread::spawn(move || {
         let mut writer = writer;
         let mut out: Vec<u8> = Vec::with_capacity(VIDEO_JPEG_MAX);
+        let mut crop: Vec<u8> = vec![0u8; VIDEO_PANEL_W * VIDEO_H * 4]; // one eye at most
+        let mut lens = [0usize; VIDEO_RECTS_MAX];
         let mut cached: Vec<u8> = Vec::new(); // last frame sent, for the heartbeat
-        let mut cached_mask = [0u8; VIDEO_MASK_BYTES];
+        let mut cached_rects = [Rect {
+            eye: 0,
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        }; VIDEO_RECTS_MAX];
+        let mut cached_lens = [0usize; VIDEO_RECTS_MAX];
+        let mut cached_n = 0usize;
         let mut cached_id = 0u16;
         let mut last_sent = Instant::now();
         let interval = Duration::from_micros(1_000_000 / VIDEO_TARGET_FPS);
+        // Frames are paced on a fixed grid, one interval apart, so a frame that
+        // is one small fragment neither waits out its own interval before the
+        // first write nor lets the rate drift above the target.
+        let mut grid = Instant::now();
         let mut log_at = Instant::now();
-        let (mut sent, mut big, mut enc_us, mut enc_n) = (0u32, 0u32, 0u64, 0u32);
+        let (mut sent, mut big, mut enc_us, mut enc_n, mut rects_sent) = (0u32, 0u32, 0u64, 0u32, 0u32);
         loop {
             match frame_rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(frm) => {
-                    let frame_start = Instant::now();
+                    let frame_start = grid.max(Instant::now());
+                    grid = frame_start + interval;
                     out.clear();
-                    let mut enc = jpeg_encoder::Encoder::new(&mut out, JPEG_QUALITY);
-                    enc.set_sampling_factor(jpeg_encoder::SamplingFactor::F_2_2); // 4:2:0
-                    let encoded = enc.encode(
-                        &frm.rgba,
-                        VIDEO_W as u16,
-                        VIDEO_H as u16,
-                        jpeg_encoder::ColorType::Rgba,
-                    );
+                    // One JPEG per rectangle, concatenated in `out`: the device
+                    // slices the blob back apart by the lengths in the table.
+                    let mut ok = true;
+                    let mut n = 0usize;
+                    for r in frm.rects.iter().take(frm.rects_n) {
+                        let len = r.w as usize * r.h as usize * 4;
+                        crop_rgba(&mut crop[..len], &frm.rgba, r);
+                        let before = out.len();
+                        let mut enc = jpeg_encoder::Encoder::new(&mut out, JPEG_QUALITY);
+                        enc.set_sampling_factor(jpeg_encoder::SamplingFactor::F_2_2); // 4:2:0
+                        match enc.encode(&crop[..len], r.w, r.h, jpeg_encoder::ColorType::Rgba) {
+                            Ok(()) => {
+                                lens[n] = out.len() - before;
+                                n += 1;
+                            }
+                            Err(_) => {
+                                ok = false;
+                                break;
+                            }
+                        }
+                    }
                     enc_us += frame_start.elapsed().as_micros() as u64;
                     enc_n += 1;
                     let _ = return_tx.send(frm.rgba);
                     // `big`: frames skipped rather than truncated — an encode
-                    // error, or more bytes than the device will assemble.
-                    if encoded.is_err() || out.len() > VIDEO_JPEG_MAX {
+                    // error, a rectangle that did not encode, or more bytes than
+                    // the device will assemble.
+                    if !ok || n != frm.rects_n || out.len() > VIDEO_JPEG_MAX {
                         big += 1;
                     } else {
                         cached.clear();
                         cached.extend_from_slice(&out);
-                        cached_mask = frm.mask;
+                        cached_rects = frm.rects;
+                        cached_lens = lens;
+                        cached_n = n;
                         cached_id = frm.id;
-                        send_mask(&mut writer, frm.id, &frm.mask);
-                        send_jpeg(&mut writer, frm.id, &out, frame_start, interval);
+                        send_rects(&mut writer, frm.id, &frm.rects[..n], &lens[..n]);
+
+                        send_blob(&mut writer, frm.id, &out, frame_start, interval);
+                        rects_sent += n as u32;
                         sent += 1;
                         last_sent = Instant::now();
                     }
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                     // Static scene: the render thread enqueues nothing, so keep
-                    // the device's idle RGB cycle away with a slow re-send —
-                    // mask included, or the device would repaint both panels in
-                    // full (and count it) every two seconds.
-                    if !cached.is_empty()
+                    // the device's idle RGB cycle away with a slow re-send of
+                    // the last frame — rectangles included, so the device paints
+                    // what it painted before rather than nothing.
+                    if cached_n > 0
                         && last_sent.elapsed() >= Duration::from_millis(VIDEO_HEARTBEAT_MS)
                     {
-                        send_mask(&mut writer, cached_id, &cached_mask);
-                        send_jpeg(&mut writer, cached_id, &cached, Instant::now(), interval);
-                        last_sent = Instant::now();
+                        let now = Instant::now();
+                        grid = now + interval;
+                        send_rects(&mut writer, cached_id, &cached_rects[..cached_n], &cached_lens[..cached_n]);
+                        send_blob(&mut writer, cached_id, &cached, now, interval);
+                        last_sent = now;
                     }
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
@@ -585,11 +694,13 @@ fn setup_scene(
                     enc_us as f64 / enc_n as f64 / 1000.0
                 };
                 println!(
-                    "video {sent} fps drop {} big {big} enc {enc_ms:.1} ms",
-                    dropped_tx.load(Ordering::Relaxed)
+                    "video {sent} fps drop {} big {big} enc {enc_ms:.1} ms rects {}",
+                    dropped_tx.load(Ordering::Relaxed),
+                    rects_sent
                 );
                 sent = 0;
                 big = 0;
+                rects_sent = 0;
                 enc_us = 0;
                 enc_n = 0;
                 log_at = Instant::now();
@@ -605,6 +716,7 @@ fn setup_scene(
         dropped,
         prev: vec![0u8; VIDEO_W * 4 * VIDEO_H].into_boxed_slice(),
         prev_valid: false,
+        full_at: Instant::now(),
         frame_id: 0,
     });
     // One persistent readback: the component fires every frame on its own
@@ -626,14 +738,17 @@ fn on_video_readback(readback: On<ReadbackComplete>, mut video: ResMut<VideoTx>)
         return;
     }
     let src = &data[..VIDEO_W * 4 * VIDEO_H];
-    if video.prev_valid && &video.prev[..] == src {
+    let keyframe_due = video.full_at.elapsed() >= Duration::from_millis(VIDEO_KEYFRAME_MS);
+    if video.prev_valid && !keyframe_due && &video.prev[..] == src {
         return; // static scene: no buffer taken, nothing enqueued
     }
-    // Nothing on the device is known to match the first frame, so it all goes.
-    let mask = if video.prev_valid {
-        dirty_mask(src, &video.prev)
+    // Nothing on the device is known to match the first frame (no previous
+    // readback), and every keyframe interval everything goes again, so the
+    // panels are repaired after a lost frame or the device's own colour cycle.
+    let (rects, rects_n) = if video.prev_valid && !keyframe_due {
+        dirty_rects(src, &video.prev, false)
     } else {
-        [0xFFu8; VIDEO_MASK_BYTES]
+        dirty_rects(src, src, true)
     };
     let mut buf = video
         .free_rx
@@ -642,9 +757,21 @@ fn on_video_readback(readback: On<ReadbackComplete>, mut video: ResMut<VideoTx>)
     buf.copy_from_slice(src);
     video.prev.copy_from_slice(src);
     video.prev_valid = true;
+    if rects_n == 0 {
+        let _ = video.free_tx.send(buf); // nothing changed, and no keyframe due
+        return;
+    }
+    if keyframe_due {
+        video.full_at = Instant::now();
+    }
     let frame = video.frame_id;
     video.frame_id = frame.wrapping_add(1);
-    match video.frame_tx.try_send(Frame { rgba: buf, mask, id: frame }) {
+    match video.frame_tx.try_send(Frame {
+        rgba: buf,
+        rects,
+        rects_n,
+        id: frame,
+    }) {
         Ok(()) => {}
         // Sender behind: supersede the queued frame — it is already stale by the
         // time the sender would reach it — and retry, so the newest frame wins
@@ -780,77 +907,162 @@ mod tests {
         assert_eq!(&frame[..n], &want[..]);
     }
 
-    fn tile_bit(mask: &[u8; VIDEO_MASK_BYTES], tx: usize, ty: usize) -> bool {
-        let t = ty * (VIDEO_W / VIDEO_TILE) + tx;
-        mask[t >> 3] & (1 << (t & 7)) != 0
+    fn poke(buf: &mut [u8], eye: usize, tx: usize, ty: usize, dx: usize, dy: usize) {
+        let x = eye * VIDEO_PANEL_W + tx * VIDEO_TILE + dx;
+        let y = ty * VIDEO_TILE + dy;
+        buf[y * VIDEO_W * 4 + x * 4] = 0xFF;
     }
 
-    // Wire layout of one dirty-tile mask frame, pinned to the same literal bytes
-    // the device-side test (tests/video_test.cpp) asserts: magic,
-    // FRAME_VIDEO_MASK, len, 4 B header (frame/tiles, LE), mask, CRC-16.
+    // Wire layout of the rectangle table for one frame, pinned to the same
+    // literal bytes the device-side test (tests/video_test.cpp) asserts: magic,
+    // FRAME_VIDEO_RECT, len, frame id, rect count, then the rects.
     #[test]
-    fn video_mask_wire_layout_is_pinned() {
-        let mut mask = [0u8; VIDEO_MASK_BYTES];
-        for (i, b) in mask.iter_mut().enumerate() {
-            *b = i as u8;
-        }
-        let mut wire = Vec::new();
-        send_mask(&mut wire, 0x1234, &mask);
-        let mut want = vec![
-            0x55, 0xAA, 0x04, 0x4F, 0x00, // magic, FRAME_VIDEO_MASK, len = 79
-            0x34, 0x12, 0x58, 0x02, // frame, tiles = 600
+    fn video_rect_frame_wire_layout_is_pinned() {
+        let rects = [
+            Rect {
+                eye: 0,
+                x: 16,
+                y: 32,
+                w: 48,
+                h: 64,
+            },
+            Rect {
+                eye: 1,
+                x: 304,
+                y: 0,
+                w: 16,
+                h: 16,
+            },
         ];
-        want.extend_from_slice(&mask);
+        let lens = [111usize, 7usize];
+        let mut wire = Vec::new();
+        send_rects(&mut wire, 0x1234, &rects, &lens);
+        let mut want = vec![
+            0x55, 0xAA, 0x05, 0x1A, 0x00, // magic, FRAME_VIDEO_RECT, len = 26
+            0x34, 0x12, 0x02, 0x00, // frame, rects = 2
+            0x00, 0x10, 0x00, 0x20, 0x00, 0x30, 0x00, 0x40, 0x00, 0x6F, 0x00,
+            0x01, 0x30, 0x01, 0x00, 0x00, 0x10, 0x00, 0x10, 0x00, 0x07, 0x00,
+        ];
         let mut crc: u16 = 0xFFFF;
-        for &b in &wire[2..5 + 4 + VIDEO_MASK_BYTES] {
+        for &b in &wire[2..5 + 4 + 2 * VIDEO_RECT_LEN] {
             crc = frame_crc_feed(crc, b);
         }
         want.extend_from_slice(&crc.to_le_bytes());
         assert_eq!(wire, want);
     }
 
-    // The mask must name exactly the tiles that changed, in the row-major
-    // column order the device's blit walks: a shifted bit paints the wrong
-    // 16x16 tile and leaves the changed one stale.
+    // The rectangles must cover exactly the tiles that changed, per eye: one
+    // that is too small leaves stale pixels on the panel, one that is too large
+    // pays decode and blit for pixels that did not move.
     #[test]
-    fn dirty_mask_covers_exactly_the_changed_tiles() {
-        assert_eq!(VIDEO_TILES, 600);
-        assert_eq!((VIDEO_W / VIDEO_TILE, VIDEO_H / VIDEO_TILE), (40, 15));
+    fn dirty_rects_cover_exactly_the_changed_tiles() {
         let base = vec![0u8; VIDEO_W * 4 * VIDEO_H];
-        let poke = |buf: &mut [u8], tx: usize, ty: usize, dx: usize, dy: usize| {
-            let x = tx * VIDEO_TILE + dx;
-            let y = ty * VIDEO_TILE + dy;
-            buf[y * VIDEO_W * 4 + x * 4] = 0xFF;
-        };
+        // Nothing changed: no rectangles, which the caller turns into "send
+        // nothing at all".
+        assert_eq!(dirty_rects(&base, &base, false).1, 0);
 
-        // One corner pixel per tile: a whole tile goes dirty, its neighbours
-        // do not, and the count is exact.
+        // One tile in each eye: two rectangles, each exactly that tile.
         let mut cur = base.clone();
-        poke(&mut cur, 21, 3, 0, 0);
-        poke(&mut cur, 21, 3, VIDEO_TILE - 1, VIDEO_TILE - 1);
-        poke(&mut cur, 0, 0, 0, 1);
-        poke(&mut cur, 39, 14, VIDEO_TILE - 1, 0);
-        let mask = dirty_mask(&cur, &base);
-        let set: usize = mask.iter().map(|b| b.count_ones() as usize).sum();
-        assert_eq!(set, 3, "one tile each for (21,3), (0,0), (39,14)");
-        assert!(tile_bit(&mask, 21, 3));
-        assert!(tile_bit(&mask, 0, 0));
-        assert!(tile_bit(&mask, 39, 14));
-        assert!(!tile_bit(&mask, 20, 3) && !tile_bit(&mask, 22, 3));
-        assert!(!tile_bit(&mask, 21, 2) && !tile_bit(&mask, 21, 4));
+        poke(&mut cur, 0, 3, 2, 0, 0);
+        poke(&mut cur, 1, 19, 14, VIDEO_TILE - 1, VIDEO_TILE - 1);
+        let (rects, n) = dirty_rects(&cur, &base, false);
+        assert_eq!(n, 2);
+        assert_eq!(
+            rects[0],
+            Rect {
+                eye: 0,
+                x: 48,
+                y: 32,
+                w: 16,
+                h: 16
+            }
+        );
+        assert_eq!(
+            rects[1],
+            Rect {
+                eye: 1,
+                x: 304,
+                y: 224,
+                w: 16,
+                h: 16
+            }
+        );
 
-        // An unchanged frame repaints nothing at all.
-        assert_eq!(dirty_mask(&base, &base), [0u8; VIDEO_MASK_BYTES]);
+        // Scattered tiles in one eye collapse to their bounding box, and the
+        // untouched eye contributes nothing.
+        let mut cur = base.clone();
+        poke(&mut cur, 1, 4, 1, 5, 5);
+        poke(&mut cur, 1, 9, 4, 1, 1);
+        let (rects, n) = dirty_rects(&cur, &base, false);
+        assert_eq!(n, 1);
+        assert_eq!(
+            rects[0],
+            Rect {
+                eye: 1,
+                x: 64,
+                y: 16,
+                w: 96,
+                h: 64
+            }
+        );
+
+        // A keyframe is both whole panels whatever changed.
+        let (rects, n) = dirty_rects(&base, &base, true);
+        assert_eq!(n, 2);
+        for (i, r) in rects.iter().enumerate() {
+            assert_eq!(
+                *r,
+                Rect {
+                    eye: i as u8,
+                    x: 0,
+                    y: 0,
+                    w: 320,
+                    h: 240
+                }
+            );
+        }
+    }
+
+    // The crop is what the encoder is handed, in canvas coordinates: an eye's
+    // rectangle is offset by that eye's half of the canvas.
+    #[test]
+    fn crop_rgba_packs_the_rectangle_rows_tight() {
+        let mut rgba = vec![0u8; VIDEO_W * 4 * VIDEO_H];
+        for y in 0..VIDEO_H {
+            for x in 0..VIDEO_W {
+                let o = (y * VIDEO_W + x) * 4;
+                rgba[o] = (x % 251) as u8;
+                rgba[o + 1] = (y % 251) as u8;
+                rgba[o + 2] = 0x5A;
+            }
+        }
+        let r = Rect {
+            eye: 1,
+            x: 32,
+            y: 48,
+            w: 32,
+            h: 16,
+        };
+        let mut out = vec![0u8; r.w as usize * r.h as usize * 4];
+        crop_rgba(&mut out, &rgba, &r);
+        for row in 0..16usize {
+            for col in 0..32usize {
+                let o = (row * 32 + col) * 4;
+                assert_eq!(out[o], ((VIDEO_PANEL_W + 32 + col) % 251) as u8);
+                assert_eq!(out[o + 1], ((48 + row) % 251) as u8);
+                assert_eq!(out[o + 2], 0x5A);
+            }
+        }
     }
 
     // Fragments come out in order with the expected lengths, and the parser puts
     // them back together byte for byte (the device's assembler mirrors this).
     #[test]
-    fn send_jpeg_fragments_and_the_parser_reassembles_them() {
+    fn send_blob_fragments_and_the_parser_reassembles_them() {
         let blob: Vec<u8> = (0..VIDEO_FRAG_MAX * 2 + 17).map(|i| (i * 7) as u8).collect();
         let mut wire = Vec::new();
         // Duration::ZERO: nothing to pace against in a test.
-        send_jpeg(&mut wire, 9, &blob, Instant::now(), Duration::ZERO);
+        send_blob(&mut wire, 9, &blob, Instant::now(), Duration::ZERO);
         let mut parser = FrameParser::default();
         let mut out = vec![0u8; FRAME_MAX_PAYLOAD];
         let mut hdrs: Vec<(u16, u16, u16, u16)> = Vec::new();
