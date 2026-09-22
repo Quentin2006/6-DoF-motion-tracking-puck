@@ -19,16 +19,29 @@ serial to a **Rust/Bevy** desktop engine that drives a look-around camera rig.
 
 ```sh
 make compile   # build the firmware
-make upload    # flash to /dev/ttyACM0
+make upload    # flash to the puck's own USB port ($(PORT))
 make monitor   # serial console
 make device    # compile + upload + monitor
 make engine    # run the Bevy visualizer
 make all       # compile + upload + engine
 make test      # engine unit tests + host packet-contract test
 ```
-FQBN is `esp32:esp32:esp32s3:CDCOnBoot=cdc`; flashing uses the UART bridge at
-`/dev/ttyACM0`. The engine finds the puck itself — native USB `303a:1001` at
-921600 — so both cables can stay plugged (`PUCK_SERIAL` env overrides the port).
+FQBN is `esp32:esp32:esp32s3:CDCOnBoot=cdc`. `make upload`/`make monitor` resolve
+the puck's own USB node (`/dev/serial/by-id/usb-Espressif_USB_JTAG_*`, so the
+`ttyACM` index cannot matter), `PORT=<node>` overrides it, and a bridge-only
+setup falls back to `/dev/ttyACM0`. The engine finds the same device itself by
+USB VID:PID `303a:1001` at 921600 (`PUCK_SERIAL` env overrides the port), so both
+cables can stay plugged.
+
+## Controls
+
+The puck is the controller: its orientation *is* the rig's rotation, so the view
+follows the puck directly. Keys only reach the engine while the visualizer
+window has keyboard focus.
+
+- `R` — recenter: the orientation the puck is in right now becomes the reference
+  view (the rig ends up looking down -Z at the reference object). Full
+  orientation, all three axes, and it lands in one frame rather than easing.
 
 ## Status LED
 
