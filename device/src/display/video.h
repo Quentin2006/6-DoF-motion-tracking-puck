@@ -3,49 +3,110 @@
 #include <cstdint>
 #include <cstring>
 
-// Video wire contract: engine -> device 640x240 baseline JPEG (the stereo
-// pair: left eye | right eye, side by side), cut into fragments and sent as
-// FRAME_VIDEO frames (device/frame.h) over the single USB-CDC port, landscape
-// (90 deg CW from portrait 0).
+// Video wire contract: engine -> device, one stereo pair per frame, as one or
+// two baseline JPEGs covering only the rectangles that changed, cut into
+// fragments and sent as FRAME_VIDEO frames (device/frame.h) over the single
+// USB-CDC port.
 //
-// The sender paces one fragment per slice of the frame interval, never a whole
-// image at once: the USB-Serial-JTAG RX FIFO is 64 B, so a burst overflows it
-// and shreds the frame (measured: 10.4 kB every 34 ms loses ~30% of its bytes,
-// the same average rate spread per fragment loses none). A fragment lost that
-// way costs exactly one frame — the next one starts clean.
+// Canvas: 640x240, the left eye at x in [0,320) and the right at [320,640) —
+// one panel per half. Painting is per dirty rectangle and in *eye-local*
+// coordinates (FRAME_VIDEO_RECT), so the rect names its panel and the device
+// decodes nothing that did not change: a full 640x240 decode is ~17 ms of
+// JPEGDEC on this chip (measured, pixel-bound — quality does not move it),
+// which capped the panel near 31 fps however little of the frame differed.
 //
-// The canvas is split in half geometrically, not by an eye field in the
-// header: tile columns 0..19 are the left panel, 20..39 the right one. Which
-// panel is the physical left eye is a wiring fact (see panel_tile_x).
+// The sender paces fragments inside the frame interval, never a whole image at
+// once: the USB-Serial-JTAG RX FIFO is 64 B, so a burst overflows it and
+// shreds the frame (measured: 10.4 kB every 34 ms loses ~30% of its bytes, the
+// same average rate spread per fragment loses none). A fragment lost that way
+// costs exactly one frame — the next one starts clean.
+//
+// Panel mounting, including the fact that the two panels are rotated 180 deg
+// from each other, is display hardware: see TFT_ROTATION in config.h.
 constexpr int VIDEO_W = 640;
 constexpr int VIDEO_H = 240;
-constexpr int VIDEO_PANEL_W = 320; // one panel's width in canvas space
-// (Panel mounting, including the fact that the two panels are rotated 180 deg
-// from each other, is display hardware: see TFT_ROTATION in config.h.)
+constexpr int VIDEO_PANEL_W = 320; // one panel's width, i.e. one eye
 constexpr size_t VIDEO_HDR_LEN = 8;
 constexpr size_t VIDEO_FRAG_MAX = 1280;  // JPEG bytes per fragment; 8 + this = FRAME_MAX_PAYLOAD
-constexpr size_t VIDEO_JPEG_MAX = 49152; // device assembly buffer, and the largest frame accepted
+constexpr size_t VIDEO_JPEG_MAX = 16384; // device assembly buffer, and the largest blob accepted
 
-// Dirty-tile grid. 16x16 is exactly the 4:2:0 MCU, so JPEGDEC's block groups
-// (8 MCUs x 1 at this geometry) tile-align: a block is a whole number of
-// tiles, and a tile never straddles two blocks. A tile is repainted only when
-// the host says it changed (FRAME_VIDEO_MASK), because a full both-panel blit
-// costs 2*153600 B at the measured 3.38 MB/s = 90.8 ms — 9 fps on its own.
+// Dirty-rectangle grid. 16x16 is exactly the 4:2:0 MCU, so a rectangle that is
+// 16-px aligned on every side is a whole number of MCUs and a whole number of
+// tiles, and JPEGDEC's block groups (8 MCUs x 1 at this geometry) never
+// straddle a rectangle edge either. Rectangles are what make the decode cost
+// track the *changed* area instead of the canvas: the SPI blit is what is left
+// (2*153600 B at the measured 3.38 MB/s = 90.8 ms for a full both-panel
+// repaint, which is why nothing repaints all of it unless it must).
 constexpr size_t VIDEO_TILE = 16;
-constexpr size_t VIDEO_TILES = (VIDEO_W / VIDEO_TILE) * (VIDEO_H / VIDEO_TILE); // 600
-constexpr size_t VIDEO_MASK_BYTES = (VIDEO_TILES + 7) / 8;                      // 75
+constexpr size_t VIDEO_RECTS_MAX = 2; // one per eye, at most
+constexpr size_t VIDEO_RECT_LEN = 11; // eye u8 | x,y,w,h u16 LE | jpeg_len u16 LE
 
-// Panel index and in-panel x for a canvas tile column, or -1 if out of range.
-// Columns 0..19 are panel 0, 20..39 panel 1 — both VIDEO_PANEL_W/VIDEO_TILE
-// columns wide. The in-panel x is in the panel's own 320x240 (rotated) space.
-inline int panel_tile_x(int tile_x, int *local_x) {
-  constexpr int cols = VIDEO_W / VIDEO_TILE;
-  constexpr int per_panel = VIDEO_PANEL_W / VIDEO_TILE;
-  if (tile_x < 0 || tile_x >= cols) {
-    return -1;
+// One dirty rectangle: which panel, where inside it, and how many bytes of the
+// frame's blob belong to it. Eye-local coordinates, so nothing has to split
+// canvas space twice and a rectangle can never span both panels.
+struct VideoRect {
+  uint8_t eye; // 0 = left half / panel 0, 1 = right half / panel 1
+  uint16_t x, y, w, h;
+  uint16_t jpeg_len;
+};
+
+struct VideoRectsHdr {
+  uint16_t frame;
+  uint16_t rects;
+  VideoRect rect[VIDEO_RECTS_MAX];
+};
+
+// Parse and validate a whole rect payload (4 + VIDEO_RECT_LEN * rects bytes):
+// false if it does not describe rectangles this device can paint. Every bound
+// is checked here because the decode path trusts it: a rect past the panel edge
+// would blit outside the address window, and a rect that is not MCU-aligned
+// would not line up with the JPEG that follows.
+inline bool parse_video_rects_hdr(const uint8_t *pkt, size_t n, VideoRectsHdr &hdr) {
+  if (n < 4) {
+    return false;
   }
-  *local_x = (tile_x % per_panel) * (int)VIDEO_TILE;
-  return tile_x / per_panel;
+  memcpy(&hdr.frame, pkt + 0, 2);
+  memcpy(&hdr.rects, pkt + 2, 2);
+  const size_t count = hdr.rects;
+  if (count == 0 || count > VIDEO_RECTS_MAX || n < 4 + count * VIDEO_RECT_LEN) {
+    return false;
+  }
+  for (size_t i = 0; i < count; i++) {
+    const uint8_t *r = pkt + 4 + i * VIDEO_RECT_LEN;
+    VideoRect &out = hdr.rect[i];
+    out.eye = r[0];
+    memcpy(&out.x, r + 1, 2);
+    memcpy(&out.y, r + 3, 2);
+    memcpy(&out.w, r + 5, 2);
+    memcpy(&out.h, r + 7, 2);
+    memcpy(&out.jpeg_len, r + 9, 2);
+    if (out.eye > 1 || out.w == 0 || out.h == 0 || out.jpeg_len == 0) {
+      return false;
+    }
+    if ((out.x % VIDEO_TILE) != 0 || (out.y % VIDEO_TILE) != 0 || (out.w % VIDEO_TILE) != 0 ||
+        (out.h % VIDEO_TILE) != 0) {
+      return false;
+    }
+    if (out.x + out.w > VIDEO_PANEL_W || out.y + out.h > VIDEO_H) {
+      return false;
+    }
+  }
+  // A frame is one JPEG per rectangle, concatenated in the blob the fragments
+  // carry; the caller checks the assembled length against this sum.
+  size_t total = 0;
+  for (size_t i = 0; i < count; i++) {
+    total += hdr.rect[i].jpeg_len;
+  }
+  return total <= VIDEO_JPEG_MAX;
+}
+
+// Total JPEG bytes a parsed rect set expects in the blob.
+inline size_t video_rects_blob_len(const VideoRectsHdr &hdr) {
+  size_t total = 0;
+  for (size_t i = 0; i < hdr.rects && i < VIDEO_RECTS_MAX; i++) {
+    total += hdr.rect[i].jpeg_len;
+  }
+  return total;
 }
 
 // Header (8 B, all u16 LE): frame_id | frag_idx | frag_count | frag_len.
@@ -68,45 +129,6 @@ inline bool parse_video_frag_hdr(const uint8_t *pkt, size_t n, VideoFragHdr &hdr
   memcpy(&hdr.count, pkt + 4, 2);
   memcpy(&hdr.len, pkt + 6, 2);
   return true;
-}
-
-// ---------------------------------------------------------------- dirty mask
-// FRAME_VIDEO_MASK payload (4 + VIDEO_MASK_BYTES = 79 B, all u16 LE):
-// frame_id | tiles | mask.
-//
-// The device cannot work dirtiness out for itself: a per-eye 320x240 RGB565
-// shadow is 307 KB and it has 82 KB free. The host already holds the previous
-// RGBA frame, so it computes the mask and sends it as 75 bytes per frame.
-// Bit t covers tile t (row-major over VIDEO_W/VIDEO_TILE columns, VIDEO_TILE^2
-// px); only tiles == VIDEO_TILES is accepted, and the mask must ride the frame
-// whose id it names, or the device paints blind.
-struct VideoMaskHdr {
-  uint16_t frame;
-  uint16_t tiles;
-};
-
-// Parse and validate a whole mask payload; false if it is not a full mask for
-// this canvas. Accepts nothing partial: a short payload would leave the tail
-// of the mask undefined and silently under-paint.
-inline bool parse_video_mask_hdr(const uint8_t *pkt, size_t n, VideoMaskHdr &hdr) {
-  constexpr size_t kLen = 4 + VIDEO_MASK_BYTES;
-  if (n < kLen) {
-    return false;
-  }
-  memcpy(&hdr.frame, pkt + 0, 2);
-  memcpy(&hdr.tiles, pkt + 2, 2);
-  return hdr.tiles == VIDEO_TILES;
-}
-
-// Whether a mask may be applied to the frame it names. A mask describes what
-// changed since the previous frame, so it is only valid when the panel is
-// actually showing that previous frame: the successor of the last painted id,
-// or the same id again (the static-scene heartbeat re-sends the last frame
-// with its own mask). A gap means a frame never reached the panel, so the tiles
-// it changed are stale and the mask's baseline is wrong — the caller repaints
-// the whole canvas instead. Ids wrap at 16 bits.
-inline bool mask_trustworthy(uint16_t frame_id, uint16_t last_painted, bool have_painted) {
-  return have_painted && (frame_id == last_painted || frame_id == (uint16_t)(last_painted + 1));
 }
 
 // Reassemble one JPEG from its fragments (must mirror send_jpeg in

@@ -16,10 +16,11 @@ public:
   // one canvas tile inside it, endBurst closes it. The video task skips the
   // transaction entirely when no tile needs painting.
   void beginBurst();
-  // Paint one VIDEO_TILE x VIDEO_TILE canvas tile at (x, y), `px` holding
-  // VIDEO_TILE contiguous RGB565 pixels per row. The tile's column picks the
-  // panel; tiles outside the canvas are dropped.
-  void blitTile(int x, int y, const uint16_t *px);
+  // Paint one VIDEO_TILE x VIDEO_TILE tile at (x, y) inside `panel`, `px`
+  // holding VIDEO_TILE contiguous RGB565 pixels per row. Coordinates are the
+  // panel's own (the rect that carried the tile named the panel), and the
+  // caller has already validated that the tile is inside it.
+  void blitTile(int panel, int x, int y, const uint16_t *px);
   void endBurst();
   // A video frame arrived (whether or not anything needed repainting), so the
   // idle RGB cycle stays away.

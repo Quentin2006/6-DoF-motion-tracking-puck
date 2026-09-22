@@ -11,13 +11,14 @@
 // CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF) over type + len bytes +
 // payload only (magic and crc excluded).
 // Pose payload (FRAME_POSE, len == 36) is the exact 36 bytes from
-// build_quat_packet (device/packet.h); video payload (FRAME_VIDEO) is the
-// 8-byte fragment header (device/src/display/video.h) + JPEG fragment bytes.
+// build_quat_packet (device/packet.h); video payloads (FRAME_VIDEO_RECT,
+// FRAME_VIDEO) are the rect table and the 8-byte fragment header from
+// device/src/display/video.h.
 constexpr uint8_t FRAME_MAGIC_0 = 0x55;
 constexpr uint8_t FRAME_MAGIC_1 = 0xAA;
 constexpr uint8_t FRAME_POSE = 0x01;
 constexpr uint8_t FRAME_VIDEO = 0x02; // one JPEG fragment: 8 B header + <= 1280 B
-constexpr uint8_t FRAME_VIDEO_MASK = 0x04; // dirty-tile mask for one stereo frame: 79 B
+constexpr uint8_t FRAME_VIDEO_RECT = 0x05; // dirty rectangles for one stereo frame: 4 + 11*rects B
 constexpr size_t FRAME_MAX_PAYLOAD = 1288; // largest payload: 8 + VIDEO_FRAG_MAX
 constexpr size_t FRAME_HDR_LEN = 5;        // magic[2] + type + len[2]
 constexpr size_t FRAME_CRC_LEN = 2;

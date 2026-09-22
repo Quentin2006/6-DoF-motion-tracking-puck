@@ -1,6 +1,6 @@
 #include <Arduino.h>
 #include "display.h"
-#include "video.h" // VIDEO_TILE, panel_tile_x
+#include "video.h" // VIDEO_TILE
 
 namespace {
 // Chip select per panel, in the same order as tft_ (tft_[0] = panel 0).
@@ -51,23 +51,18 @@ void Display::begin() {
 }
 
 // The burst cannot use Adafruit's startWrite/endWrite: those drive the CS of
-// the instance they belong to, and blitTile paints whichever panel owns the
-// tile — so panel 1's pixels would be clocked in while panel 0 was selected
-// and land on panel 0. The transaction is opened here instead, and blitTile
-// selects the panel per tile.
+// the instance they belong to, and blitTile paints whichever panel the frame's
+// rectangle named — so panel 1's pixels would be clocked in while panel 0 was
+// selected and land on panel 0. The transaction is opened here instead, and
+// blitTile selects the panel per tile.
 void Display::beginBurst() { SPI.beginTransaction(SPISettings(TFT_SPI_FREQ, MSBFIRST, SPI_MODE0)); }
 
 void Display::endBurst() { SPI.endTransaction(); }
 
-void Display::blitTile(int x, int y, const uint16_t *px) {
-  int localX = 0;
-  const int panel = panel_tile_x(x / (int)VIDEO_TILE, &localX);
-  if (panel < 0) {
-    return;
-  }
+void Display::blitTile(int panel, int x, int y, const uint16_t *px) {
   Adafruit_ST7789 &tft = tft_[panel];
   digitalWrite(kCsPins[panel], LOW);
-  tft.setAddrWindow((uint16_t)localX, (uint16_t)y, (uint16_t)VIDEO_TILE, (uint16_t)VIDEO_TILE);
+  tft.setAddrWindow((uint16_t)x, (uint16_t)y, (uint16_t)VIDEO_TILE, (uint16_t)VIDEO_TILE);
   // Adafruit's 2nd argument is a PIXEL count (w*h*2 bytes on the wire).
   // bigEndian=false is the word swap the panel needs: SPIClass::writePixels
   // swaps in hardware on ESP32.
