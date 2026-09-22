@@ -110,14 +110,21 @@ The fragment layout is **canonical in `device/src/display/video.h`**
 bytes for one fragment, so a one-sided layout change fails `make test`.
 
 The rectangle table is canonical there too (`VIDEO_W = 640` split into two
-320-wide eye halves, 16x16 tile grid, `parse_video_rects_hdr`, and the eye-local
-rect that names its own panel). A frame is a rect table followed by the blob its
-`jpeg_len`s slice up; the device paints a table only when the lengths match the
-assembled blob and the rectangle decodes at exactly its declared size, so a
-mismatched frame is counted bad rather than painted somewhere wrong. The host
-re-sends the whole canvas every `VIDEO_KEYFRAME_MS` (2 s) — with rectangles the
-device holds no full-canvas pixels, so that periodic keyframe is what repairs
-the panels after a lost frame or after the device's own idle RGB cycle. The engine's
+320-wide eye halves, 16x16 tile grid, up to `VIDEO_RECTS_MAX = 4` rectangles,
+`parse_video_rects_hdr`, and the eye-local rect that names its own panel). A
+frame is a rect table followed by the blob its `jpeg_len`s slice up; the device
+paints a table only when the lengths match the assembled blob and the rectangle
+decodes at exactly its declared size, so a mismatched frame is counted bad
+rather than painted somewhere wrong.
+
+The host re-sends the whole canvas every `VIDEO_KEYFRAME_MS` (2 s) — with
+rectangles the device holds no full-canvas pixels, so that periodic repair is
+what fixes the panels after a lost frame or after the device's own idle RGB
+cycle. It is rolled over `VIDEO_KEYFRAME_STEPS` (4) frames, one full-height
+slice per eye each, plus that frame's dirty rectangles: the whole canvas is 600
+tiles of SPI (~102 ms measured, five times a 40 fps frame budget) and sending it
+in one frame made the panel hitch for 144 ms every two seconds. Rolled, the
+worst repair frame measured 50-57 ms instead. The engine's
 `send_mask`/`dirty_mask` are the producer, and
 `tracking.rs::video_mask_wire_layout_is_pinned` + `dirty_mask_covers_exactly_the_changed_tiles`
 assert the same bytes and the same tile-bit mapping as `tests/video_test.cpp`.

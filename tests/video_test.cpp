@@ -151,7 +151,7 @@ int main() {
   // 7. One frame's rectangle table, pinned to the literal the Rust producer
   //    test asserts (tracking.rs::video_rect_frame_wire_layout_is_pinned).
   {
-    uint8_t payload[4 + VIDEO_RECT_LEN * 2] = {};
+    uint8_t payload[4 + VIDEO_RECT_LEN * VIDEO_RECTS_MAX] = {};
     payload[0] = 0x34; // frame 0x1234
     payload[1] = 0x12;
     payload[2] = 0x02; // rects = 2
@@ -163,26 +163,29 @@ int main() {
                                         0x00, 0x10, 0x00, 0x07, 0x00};
     memcpy(payload + 4, r0, VIDEO_RECT_LEN);
     memcpy(payload + 4 + VIDEO_RECT_LEN, r1, VIDEO_RECT_LEN);
-    uint8_t frame[FRAME_HDR_LEN + sizeof payload + FRAME_CRC_LEN];
-    const size_t n = build_frame(frame, FRAME_VIDEO_RECT, payload, sizeof payload);
+    // Two rects of the four the table can hold: the payload length is what
+    // counts, not the buffer's.
+    const uint16_t len = (uint16_t)(4 + 2 * VIDEO_RECT_LEN);
+    uint8_t frame[FRAME_HDR_LEN + len + FRAME_CRC_LEN];
+    const size_t n = build_frame(frame, FRAME_VIDEO_RECT, payload, len);
     const uint8_t want[FRAME_HDR_LEN + 4] = {0x55, 0xAA, 0x05, 0x1A, 0x00, // len 26
                                              0x34, 0x12, 0x02, 0x00};     // frame, rects
     CHECK(n == sizeof frame, "rect frame length");
     CHECK(memcmp(frame, want, sizeof want) == 0, "rect header bytes");
-    CHECK(memcmp(frame + FRAME_HDR_LEN, payload, sizeof payload) == 0, "rect table bytes");
+    CHECK(memcmp(frame + FRAME_HDR_LEN, payload, len) == 0, "rect table bytes");
     uint16_t crc = 0xFFFF;
-    for (size_t i = 2; i < FRAME_HDR_LEN + sizeof payload; i++) {
+    for (size_t i = 2; i < FRAME_HDR_LEN + len; i++) {
       crc = frame_crc_feed(crc, frame[i]);
     }
-    CHECK(frame[FRAME_HDR_LEN + sizeof payload] == (uint8_t)(crc & 0xFF) &&
-              frame[FRAME_HDR_LEN + sizeof payload + 1] == (uint8_t)(crc >> 8),
+    CHECK(frame[FRAME_HDR_LEN + len] == (uint8_t)(crc & 0xFF) &&
+              frame[FRAME_HDR_LEN + len + 1] == (uint8_t)(crc >> 8),
           "rect CRC over type+len+payload");
   }
 
   // 8. The rect parser takes exactly the rectangles this device can paint: the
   //    decode path trusts the table, so every bound is checked here.
   {
-    uint8_t payload[4 + VIDEO_RECT_LEN * 2] = {};
+    uint8_t payload[4 + VIDEO_RECT_LEN * VIDEO_RECTS_MAX] = {};
     VideoRectsHdr h = {};
     auto put = [&](int i, uint8_t eye, uint16_t x, uint16_t y, uint16_t w, uint16_t h,
                    uint16_t len) {
@@ -205,7 +208,7 @@ int main() {
       payload[2] = (uint8_t)(count & 0xFF);
       payload[3] = (uint8_t)(count >> 8);
     };
-    const size_t full = sizeof payload;      // two rects
+    const size_t full = sizeof payload;      // four rects, the maximum
     const size_t one = 4 + VIDEO_RECT_LEN;   // one rect
 
     // A whole panel, and a 16-px tile at the far corner of each eye.
@@ -226,11 +229,23 @@ int main() {
     CHECK(h.rects == 2 && h.rect[1].eye == 1 && h.rect[1].y == 112, "second rect fields");
     CHECK(video_rects_blob_len(h) == 3000, "two-rect blob length");
 
+    // A repair frame: a dirty box plus a quadrant per eye, all four together.
+    {
+      put(0, 0, 32, 48, 96, 64, 500);
+      put(1, 1, 0, 128, 160, 112, 400);
+      put(2, 0, 160, 0, 160, 128, 300);
+      put(3, 1, 160, 128, 160, 112, 200);
+      rects(4);
+      CHECK(parse_video_rects_hdr(payload, full, h), "four rects accepted");
+      CHECK(h.rects == 4 && video_rects_blob_len(h) == 1400, "four-rect blob length");
+    }
+
     // Everything that must be refused.
     rects(0);
     CHECK(!parse_video_rects_hdr(payload, full, h), "zero rects rejected");
-    rects(3);
-    CHECK(!parse_video_rects_hdr(payload, full, h), "three rects rejected");
+    rects(VIDEO_RECTS_MAX + 1);
+    CHECK(!parse_video_rects_hdr(payload, full, h), "more rects than the table holds rejected");
+    CHECK(VIDEO_RECTS_MAX == 4, "rect table size");
     rects(1);
     put(0, 2, 0, 0, VIDEO_TILE, VIDEO_TILE, 100);
     CHECK(!parse_video_rects_hdr(payload, one, h), "unknown eye rejected");

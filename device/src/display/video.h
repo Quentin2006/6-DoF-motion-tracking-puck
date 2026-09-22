@@ -38,12 +38,15 @@ constexpr size_t VIDEO_JPEG_MAX = 16384; // device assembly buffer, and the larg
 // (2*153600 B at the measured 3.38 MB/s = 90.8 ms for a full both-panel
 // repaint, which is why nothing repaints all of it unless it must).
 constexpr size_t VIDEO_TILE = 16;
-constexpr size_t VIDEO_RECTS_MAX = 2; // one per eye, at most
+constexpr size_t VIDEO_RECTS_MAX = 4; // a dirty bbox and a repair quadrant per eye, at most
 constexpr size_t VIDEO_RECT_LEN = 11; // eye u8 | x,y,w,h u16 LE | jpeg_len u16 LE
 
-// One dirty rectangle: which panel, where inside it, and how many bytes of the
+// One rectangle: which panel, where inside it, and how many bytes of the
 // frame's blob belong to it. Eye-local coordinates, so nothing has to split
-// canvas space twice and a rectangle can never span both panels.
+// canvas space twice and a rectangle can never span both panels. Most frames
+// carry one rectangle per eye; a repair frame adds a quadrant per eye, which is
+// how a whole-canvas refresh is spread over KEYFRAME_STEPS frames instead of
+// costing one frame 5x its budget in SPI.
 struct VideoRect {
   uint8_t eye; // 0 = left half / panel 0, 1 = right half / panel 1
   uint16_t x, y, w, h;

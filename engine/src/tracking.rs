@@ -52,7 +52,7 @@ const VIDEO_W: usize = 640;
 const VIDEO_H: usize = 240;
 const VIDEO_PANEL_W: usize = 320; // one panel's half of the canvas, i.e. one eye
 const VIDEO_TILE: usize = 16; // tile grid == the 4:2:0 MCU the device decodes
-const VIDEO_RECTS_MAX: usize = 2; // one rectangle per eye, at most
+const VIDEO_RECTS_MAX: usize = 4; // dirty bbox + repair quadrant, per eye
 const VIDEO_RECT_LEN: usize = 11; // eye u8 | x,y,w,h u16 LE | jpeg_len u16 LE
 const VIDEO_FRAG_MAX: usize = 1280; // JPEG bytes per fragment; 8 + this = FRAME_MAX_PAYLOAD
 const VIDEO_JPEG_MAX: usize = 16384; // device assembly buffer, and the largest blob accepted
@@ -62,9 +62,30 @@ const VIDEO_HEARTBEAT_MS: u64 = 2000; // static scene: re-send so the device sta
 // Re-send the whole canvas at least this often, changed or not. With rectangles
 // the device holds no full-canvas pixels, so this is the only repair for panels
 // it repainted itself (the idle RGB cycle) and for whatever a lost frame left
-// stale. 2 s bounds both, and a full frame costs one still-cheap no-dirty-area
-// send.
+// stale.
+//
+// It is spread over KEYFRAME_STEPS frames, one slice per eye each: painting a
+// whole canvas is 600 tiles of SPI (~102 ms measured), five times a 40 fps
+// frame budget, and doing it in one frame made the panel hitch every two
+// seconds. Rolled, each repair frame is one slice more than a normal one.
 const VIDEO_KEYFRAME_MS: u64 = 2000;
+const VIDEO_KEYFRAME_STEPS: usize = 4;
+
+// One slice of a panel, for the repair pass: four vertical strips per eye, 5
+// tiles wide and the full height. Full height rather than quadrants because the
+// cost that matters is the blit: 75 tiles of SPI (~13 ms measured) plus that
+// frame's dirty box fits inside a 40 fps frame, where a quadrant's 150 tiles did
+// not (58 ms measured).
+fn repair_slice(eye: u8, step: usize) -> Rect {
+    let w = VIDEO_PANEL_W as u16 / VIDEO_KEYFRAME_STEPS as u16;
+    Rect {
+        eye,
+        x: w * step as u16,
+        y: 0,
+        w,
+        h: VIDEO_H as u16,
+    }
+}
 
 // Eye separation, matched to the panel/lens spacing: the eyes sit at -IPD_M/2
 // and +IPD_M/2. It is the only stereo-geometry knob — both eyes keep Bevy's
@@ -376,7 +397,8 @@ struct VideoTx {
     skipped: Arc<AtomicU32>,
     prev: Box<[u8]>, // last readback *enqueued* (i.e. what the panels will show)
     prev_valid: bool,
-    full_at: Instant, // when the last whole-canvas frame went out
+    full_at: Instant,   // when the last whole-canvas repair started
+    keyframe_step: usize, // quadrant cursor of the repair pass in progress
     frame_id: u16,
     // The persistent readback entity and the target it copies. The component is
     // attached only while the sender can take a frame: a readback is a
@@ -748,6 +770,7 @@ fn setup_scene(
         prev: vec![0u8; VIDEO_W * 4 * VIDEO_H].into_boxed_slice(),
         prev_valid: false,
         full_at: Instant::now(),
+        keyframe_step: 0,
         frame_id: 0,
         readback_entity,
         target,
@@ -776,18 +799,43 @@ fn on_video_readback(readback: On<ReadbackComplete>, mut video: ResMut<VideoTx>)
         return;
     }
     let src = &data[..VIDEO_W * 4 * VIDEO_H];
-    let keyframe_due = video.full_at.elapsed() >= Duration::from_millis(VIDEO_KEYFRAME_MS);
-    if video.prev_valid && !keyframe_due && &video.prev[..] == src {
+    // A repair pass walks the canvas a quadrant at a time; a frame that is not
+    // part of one carries only what changed.
+    let starting = video.full_at.elapsed() >= Duration::from_millis(VIDEO_KEYFRAME_MS);
+    if starting {
+        video.keyframe_step = 0;
+        video.full_at = Instant::now();
+    }
+    let repairing = starting || video.keyframe_step > 0;
+    if video.prev_valid && !repairing && &video.prev[..] == src {
         return; // static scene: no buffer taken, nothing enqueued
     }
     // Nothing on the device is known to match the first frame (no previous
-    // readback), and every keyframe interval everything goes again, so the
-    // panels are repaired after a lost frame or the device's own colour cycle.
-    let (rects, rects_n) = if video.prev_valid && !keyframe_due {
+    // readback), so that one goes as the whole canvas at once.
+    let (mut rects, mut rects_n) = if video.prev_valid {
         dirty_rects(src, &video.prev, false)
     } else {
         dirty_rects(src, src, true)
     };
+    let repair_step = video.keyframe_step;
+    if repairing && video.prev_valid {
+        // This pass's quadrant, per eye — unless the dirty box already covers
+        // it, in which case the frame is painting that area anyway.
+        for eye in 0..2u8 {
+            let q = repair_slice(eye, repair_step);
+            let covered = rects[..rects_n].iter().any(|r| {
+                r.eye == eye
+                    && r.x <= q.x
+                    && r.y <= q.y
+                    && r.x + r.w >= q.x + q.w
+                    && r.y + r.h >= q.y + q.h
+            });
+            if !covered && rects_n < VIDEO_RECTS_MAX {
+                rects[rects_n] = q;
+                rects_n += 1;
+            }
+        }
+    }
     let mut buf = video
         .free_rx
         .try_recv()
@@ -810,8 +858,11 @@ fn on_video_readback(readback: On<ReadbackComplete>, mut video: ResMut<VideoTx>)
             video.prev.copy_from_slice(src);
             video.prev_valid = true;
             video.frame_id = frame.wrapping_add(1);
-            if keyframe_due {
-                video.full_at = Instant::now();
+            if repairing && video.prev_valid {
+                // Only a slice that went out advances the pass: a frame the
+                // sender could not take is retried on the next readback instead
+                // of leaving a hole in the repair.
+                video.keyframe_step = (repair_step + 1) % VIDEO_KEYFRAME_STEPS;
             }
         }
         // Lost the race with the sender (it filled up in between): same deal as
@@ -1041,10 +1092,10 @@ mod tests {
             }
         );
 
-        // A keyframe is both whole panels whatever changed.
+        // The startup/anonymous case is both whole panels whatever changed.
         let (rects, n) = dirty_rects(&base, &base, true);
         assert_eq!(n, 2);
-        for (i, r) in rects.iter().enumerate() {
+        for (i, r) in rects.iter().take(n).enumerate() {
             assert_eq!(
                 *r,
                 Rect {
@@ -1056,6 +1107,36 @@ mod tests {
                 }
             );
         }
+    }
+
+    // The repair pass is the whole canvas, a quadrant per frame per eye: four
+    // steps must tile the panel exactly, stay on the MCU grid, and add up to
+    // nothing more than the canvas it replaces.
+    #[test]
+    fn repair_slices_tile_the_panel() {
+        let mut area = 0;
+        for step in 0..VIDEO_KEYFRAME_STEPS {
+            for eye in 0..2u8 {
+                let q = repair_slice(eye, step);
+                assert_eq!(q.eye, eye);
+                assert_eq!((q.x % 16, q.y % 16, q.w % 16, q.h % 16), (0, 0, 0, 0));
+                assert!(q.x + q.w <= 320 && q.y + q.h <= 240, "{q:?} outside the panel");
+                area += q.w as usize * q.h as usize;
+                // No overlap with the other quadrants of the same eye.
+                for other in 0..VIDEO_KEYFRAME_STEPS {
+                    if other == step {
+                        continue;
+                    }
+                    let o = repair_slice(eye, other);
+                    let disjoint = q.x + q.w <= o.x
+                        || o.x + o.w <= q.x
+                        || q.y + q.h <= o.y
+                        || o.y + o.h <= q.y;
+                    assert!(disjoint, "{q:?} overlaps {o:?}");
+                }
+            }
+        }
+        assert_eq!(area, 2 * 320 * 240, "the slices of one eye are the canvas");
     }
 
     // The crop is what the encoder is handed, in canvas coordinates: an eye's
