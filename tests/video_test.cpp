@@ -148,86 +148,121 @@ int main() {
     CHECK(asm_.len() == a.size(), "post-abort frame intact");
   }
 
-  // 7. One dirty-tile mask frame's wire bytes, pinned to the literal the Rust
-  //    producer test asserts (tracking.rs::video_mask_wire_layout_is_pinned).
+  // 7. One frame's rectangle table, pinned to the literal the Rust producer
+  //    test asserts (tracking.rs::video_rect_frame_wire_layout_is_pinned).
   {
-    uint8_t payload[4 + VIDEO_MASK_BYTES];
-    payload[0] = 0x34;                          // frame 0x1234
+    uint8_t payload[4 + VIDEO_RECT_LEN * 2] = {};
+    payload[0] = 0x34; // frame 0x1234
     payload[1] = 0x12;
-    payload[2] = (uint8_t)(VIDEO_TILES & 0xFF); // tiles, LE
-    payload[3] = (uint8_t)(VIDEO_TILES >> 8);
-    for (size_t i = 0; i < VIDEO_MASK_BYTES; i++) {
-      payload[4 + i] = (uint8_t)i;
-    }
+    payload[2] = 0x02; // rects = 2
+    payload[3] = 0x00;
+    // eye 0, x 16, y 32, w 48, h 64, 111 B | eye 1, x 304, y 0, w 16, h 16, 7 B
+    const uint8_t r0[VIDEO_RECT_LEN] = {0x00, 0x10, 0x00, 0x20, 0x00, 0x30,
+                                        0x00, 0x40, 0x00, 0x6F, 0x00};
+    const uint8_t r1[VIDEO_RECT_LEN] = {0x01, 0x30, 0x01, 0x00, 0x00, 0x10,
+                                        0x00, 0x10, 0x00, 0x07, 0x00};
+    memcpy(payload + 4, r0, VIDEO_RECT_LEN);
+    memcpy(payload + 4 + VIDEO_RECT_LEN, r1, VIDEO_RECT_LEN);
     uint8_t frame[FRAME_HDR_LEN + sizeof payload + FRAME_CRC_LEN];
-    const size_t n = build_frame(frame, FRAME_VIDEO_MASK, payload, sizeof payload);
-    const uint8_t want[FRAME_HDR_LEN + 4] = {0x55, 0xAA, 0x04, 0x4F, 0x00, // len 79
-                                             0x34, 0x12, 0x58, 0x02};     // frame, tiles 600
-    CHECK(n == sizeof frame, "mask frame length");
-    CHECK(memcmp(frame, want, sizeof want) == 0, "mask header bytes");
-    CHECK(memcmp(frame + FRAME_HDR_LEN + 4, payload + 4, VIDEO_MASK_BYTES) == 0, "mask bytes");
+    const size_t n = build_frame(frame, FRAME_VIDEO_RECT, payload, sizeof payload);
+    const uint8_t want[FRAME_HDR_LEN + 4] = {0x55, 0xAA, 0x05, 0x1A, 0x00, // len 26
+                                             0x34, 0x12, 0x02, 0x00};     // frame, rects
+    CHECK(n == sizeof frame, "rect frame length");
+    CHECK(memcmp(frame, want, sizeof want) == 0, "rect header bytes");
+    CHECK(memcmp(frame + FRAME_HDR_LEN, payload, sizeof payload) == 0, "rect table bytes");
     uint16_t crc = 0xFFFF;
     for (size_t i = 2; i < FRAME_HDR_LEN + sizeof payload; i++) {
       crc = frame_crc_feed(crc, frame[i]);
     }
     CHECK(frame[FRAME_HDR_LEN + sizeof payload] == (uint8_t)(crc & 0xFF) &&
               frame[FRAME_HDR_LEN + sizeof payload + 1] == (uint8_t)(crc >> 8),
-          "mask CRC over type+len+payload");
+          "rect CRC over type+len+payload");
   }
 
-  // 8. The mask parser takes one full mask for this canvas and nothing else: a
-  //    partial mask would leave tiles undefined and silently under-paint.
+  // 8. The rect parser takes exactly the rectangles this device can paint: the
+  //    decode path trusts the table, so every bound is checked here.
   {
-    CHECK(VIDEO_TILES == 600 && VIDEO_MASK_BYTES == 75, "mask geometry");
-    uint8_t payload[4 + VIDEO_MASK_BYTES] = {};
-    payload[0] = 0x34;
-    payload[1] = 0x12;
-    payload[2] = (uint8_t)(VIDEO_TILES & 0xFF);
-    payload[3] = (uint8_t)(VIDEO_TILES >> 8);
-    VideoMaskHdr h = {};
-    CHECK(parse_video_mask_hdr(payload, sizeof payload, h), "full mask accepted");
-    CHECK(h.frame == 0x1234 && h.tiles == VIDEO_TILES, "mask header fields");
-    CHECK(!parse_video_mask_hdr(payload, sizeof payload - 1, h), "short mask rejected");
-    payload[2] = (uint8_t)((VIDEO_TILES - 1) & 0xFF);
-    payload[3] = (uint8_t)((VIDEO_TILES - 1) >> 8);
-    CHECK(!parse_video_mask_hdr(payload, sizeof payload, h), "under-count rejected");
-    payload[2] = (uint8_t)((VIDEO_TILES + 1) & 0xFF);
-    payload[3] = (uint8_t)((VIDEO_TILES + 1) >> 8);
-    CHECK(!parse_video_mask_hdr(payload, sizeof payload, h), "over-count rejected");
-    // A 4-byte payload is the real hazard: reading the mask anyway would run
+    uint8_t payload[4 + VIDEO_RECT_LEN * 2] = {};
+    VideoRectsHdr h = {};
+    auto put = [&](int i, uint8_t eye, uint16_t x, uint16_t y, uint16_t w, uint16_t h,
+                   uint16_t len) {
+      uint8_t *r = payload + 4 + i * VIDEO_RECT_LEN;
+      r[0] = eye;
+      r[1] = (uint8_t)(x & 0xFF);
+      r[2] = (uint8_t)(x >> 8);
+      r[3] = (uint8_t)(y & 0xFF);
+      r[4] = (uint8_t)(y >> 8);
+      r[5] = (uint8_t)(w & 0xFF);
+      r[6] = (uint8_t)(w >> 8);
+      r[7] = (uint8_t)(h & 0xFF);
+      r[8] = (uint8_t)(h >> 8);
+      r[9] = (uint8_t)(len & 0xFF);
+      r[10] = (uint8_t)(len >> 8);
+    };
+    auto rects = [&](uint16_t count) {
+      payload[0] = 0x34;
+      payload[1] = 0x12;
+      payload[2] = (uint8_t)(count & 0xFF);
+      payload[3] = (uint8_t)(count >> 8);
+    };
+    const size_t full = sizeof payload;      // two rects
+    const size_t one = 4 + VIDEO_RECT_LEN;   // one rect
+
+    // A whole panel, and a 16-px tile at the far corner of each eye.
+    rects(1);
+    put(0, 0, 0, 0, VIDEO_PANEL_W, VIDEO_H, 100);
+    CHECK(parse_video_rects_hdr(payload, one, h), "whole panel accepted");
+    CHECK(h.frame == 0x1234 && h.rects == 1 && h.rect[0].w == VIDEO_PANEL_W,
+          "rect header fields");
+    CHECK(video_rects_blob_len(h) == 100, "blob length is the length sum");
+    put(0, 1, VIDEO_PANEL_W - VIDEO_TILE, VIDEO_H - VIDEO_TILE, VIDEO_TILE, VIDEO_TILE, 900);
+    CHECK(parse_video_rects_hdr(payload, one, h), "last tile of eye 1 accepted");
+    CHECK(video_rects_blob_len(h) == 900, "single-rect blob length");
+    // 240 divides into two 16-aligned halves only as 112 + 128.
+    put(0, 0, 0, 0, VIDEO_PANEL_W, 112, 1000);
+    rects(2);
+    put(1, 1, 0, 112, VIDEO_PANEL_W, 128, 2000);
+    CHECK(parse_video_rects_hdr(payload, full, h), "two rects accepted");
+    CHECK(h.rects == 2 && h.rect[1].eye == 1 && h.rect[1].y == 112, "second rect fields");
+    CHECK(video_rects_blob_len(h) == 3000, "two-rect blob length");
+
+    // Everything that must be refused.
+    rects(0);
+    CHECK(!parse_video_rects_hdr(payload, full, h), "zero rects rejected");
+    rects(3);
+    CHECK(!parse_video_rects_hdr(payload, full, h), "three rects rejected");
+    rects(1);
+    put(0, 2, 0, 0, VIDEO_TILE, VIDEO_TILE, 100);
+    CHECK(!parse_video_rects_hdr(payload, one, h), "unknown eye rejected");
+    put(0, 0, 8, 0, VIDEO_TILE, VIDEO_TILE, 100);
+    CHECK(!parse_video_rects_hdr(payload, one, h), "x off the MCU grid rejected");
+    put(0, 0, 0, 8, VIDEO_TILE, VIDEO_TILE, 100);
+    CHECK(!parse_video_rects_hdr(payload, one, h), "y off the MCU grid rejected");
+    put(0, 0, 0, 0, 24, VIDEO_TILE, 100);
+    CHECK(!parse_video_rects_hdr(payload, one, h), "width off the MCU grid rejected");
+    put(0, 0, 0, 0, VIDEO_TILE, 24, 100);
+    CHECK(!parse_video_rects_hdr(payload, one, h), "height off the MCU grid rejected");
+    put(0, 0, 0, 0, 0, VIDEO_TILE, 100);
+    CHECK(!parse_video_rects_hdr(payload, one, h), "zero width rejected");
+    put(0, 0, 0, 0, VIDEO_TILE, 0, 100);
+    CHECK(!parse_video_rects_hdr(payload, one, h), "zero height rejected");
+    put(0, 0, VIDEO_PANEL_W - VIDEO_TILE, 0, VIDEO_TILE * 2, VIDEO_TILE, 100);
+    CHECK(!parse_video_rects_hdr(payload, one, h), "rect past the panel edge rejected");
+    put(0, 0, 0, VIDEO_H - VIDEO_TILE, VIDEO_TILE, VIDEO_TILE * 2, 100);
+    CHECK(!parse_video_rects_hdr(payload, one, h), "rect past the panel bottom rejected");
+    put(0, 0, 0, 0, VIDEO_TILE, VIDEO_TILE, 0);
+    CHECK(!parse_video_rects_hdr(payload, one, h), "zero-length JPEG rejected");
+    put(0, 0, 0, 0, VIDEO_TILE, VIDEO_TILE, 100);
+    CHECK(!parse_video_rects_hdr(payload, one - 1, h), "truncated table rejected");
+    rects(2);
+    put(0, 0, 0, 0, VIDEO_PANEL_W, VIDEO_H, 9000);
+    put(1, 1, 0, 0, VIDEO_PANEL_W, VIDEO_H, 9000);
+    CHECK(!parse_video_rects_hdr(payload, full, h), "blob over the assembly cap rejected");
+    CHECK(VIDEO_JPEG_MAX == 16384, "assembly cap");
+    // A 4-byte payload is the real hazard: reading the table anyway would run
     // past the object, which ASAN turns into a stack-buffer-overflow.
-    uint8_t tiny[4] = {};
-    CHECK(!parse_video_mask_hdr(tiny, sizeof tiny, h), "header-only payload rejected");
-  }
-
-  // 9. Tile-column routing: which panel a canvas column lands on, and where in
-  //    that panel. The device blit uses this to pick the chip select.
-  {
-    int local = -1;
-    CHECK(panel_tile_x(0, &local) == 0 && local == 0, "col 0 -> panel 0 x 0");
-    CHECK(panel_tile_x(19, &local) == 0 && local == 304, "col 19 -> panel 0 x 304");
-    CHECK(panel_tile_x(20, &local) == 1 && local == 0, "col 20 -> panel 1 x 0");
-    CHECK(panel_tile_x(39, &local) == 1 && local == 304, "col 39 -> panel 1 x 304");
-    CHECK(panel_tile_x(40, &local) == -1, "col 40 out of range");
-    CHECK(panel_tile_x(-1, &local) == -1, "negative column out of range");
-    for (int c = 0; c < (int)(VIDEO_W / VIDEO_TILE); c++) {
-      const int p = panel_tile_x(c, &local);
-      CHECK(p == c / 20 && local == (c % 20) * (int)VIDEO_TILE, "routing covers the canvas");
-    }
-  }
-
-  // 10. A mask may only be applied when the panels show the frame it was
-  //     computed against: the last frame, its successor, or the same frame
-  //     again (the heartbeat). A gap means tiles changed in a frame that never
-  //     arrived, so the caller must repaint everything. Ids wrap at 16 bits.
-  {
-    CHECK(!mask_trustworthy(0, 0, false), "nothing painted yet is not a baseline");
-    CHECK(mask_trustworthy(0, 0, true), "heartbeat repeat is a baseline");
-    CHECK(mask_trustworthy(101, 100, true), "successor is a baseline");
-    CHECK(!mask_trustworthy(102, 100, true), "skipped frame is not a baseline");
-    CHECK(!mask_trustworthy(99, 100, true), "older frame is not a baseline");
-    CHECK(mask_trustworthy(0, 0xFFFF, true), "successor across the id wrap");
-    CHECK(!mask_trustworthy(2, 0xFFFF, true), "gap across the id wrap");
+    uint8_t tiny[4] = {0x34, 0x12, 0x01, 0x00};
+    CHECK(!parse_video_rects_hdr(tiny, sizeof tiny, h), "header-only payload rejected");
   }
 
   if (failures == 0) {
