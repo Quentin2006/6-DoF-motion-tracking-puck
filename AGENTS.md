@@ -93,7 +93,7 @@ proportional to it — and the queue saturates (`drop 4-8`). The device does hol
 | File | Role |
 |---|---|
 | `src/main.rs` | `App::new().add_plugins(DefaultPlugins).add_plugins(TrackPlugin).run()` |
-|`src/tracking.rs`|All behavior: `SerialLink`/`VideoTx` resources, `LookRig` marker with two viewport eye cameras (IPD), `TrackPlugin`, `update` ECS system, serial reader + dirty-rectangle crop/encode/fragment/paced sender thread|
+|`src/tracking.rs`|All behavior: `SerialLink`/`VideoTx` resources, `LookRig` marker with two viewport eye cameras (IPD), `TrackPlugin`, `update` ECS system, serial reader + dirty-rectangle crop/encode/fragment/paced sender thread, `ViewBias` recenter state + the `R` key binding in `update`|
 
 **Cross-file wire contract (edit both halves together).** `device/frame.h`,
 `device/packet.h`, `device/src/display/video.h` and `engine/src/tracking.rs`
@@ -286,7 +286,9 @@ verification stays manual.
   second: two per frame) and no `seq gap:` line. Device side (1 Hz, on the same
   port): `vid 40 drop 0 bad 0 kb ~70`. `drop > 0` is lost bytes in the RX queue
   (lower the target), `bad > 0` a frame the device refused — a table it cannot
-  paint or a rectangle that did not decode at its declared size.
+  paint or a rectangle that did not decode at its declared size. `R` is the only
+  keyboard binding: it recenters the view, so the puck's orientation at the
+  press becomes the reference.
 
 There is **no** unit coverage for `Ekf6Dof`, `StillDetector`, or `Mpu6050` — they
 are hardware-coupled and the serial/calibration path is their real test. Add a

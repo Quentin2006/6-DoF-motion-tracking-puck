@@ -408,10 +408,23 @@ struct VideoTx {
     target: Handle<Image>,
 }
 
+// Recenter key state: the puck orientation that the view should treat as the
+// reference. Identity means "the device's own rest frame", which is not the
+// reference view — see `update`.
+#[derive(Resource)]
+struct ViewBias(Quat);
+
+impl Default for ViewBias {
+    fn default() -> Self {
+        Self(Quat::IDENTITY)
+    }
+}
+
 pub struct TrackPlugin;
 
 impl Plugin for TrackPlugin {
     fn build(&self, app: &mut App) {
+        app.init_resource::<ViewBias>();
         app.add_systems(Startup, setup_scene);
         app.add_systems(Update, (update, throttle_readback));
         app.add_observer(on_video_readback);
@@ -507,6 +520,8 @@ fn update(
     link: Res<SerialLink>,
     mut last_seq: Local<Option<u32>>,
     mut last_applied: Local<Option<Quat>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mut bias: ResMut<ViewBias>,
     time: Res<Time>,
 ) {
     // Drain to latest: only the newest pose is displayed, so everything but
@@ -536,10 +551,24 @@ fn update(
     } else {
         pose.q
     };
+    // The device bakes a fixed ±90° X sandwich into the display quat, so the
+    // puck's rest orientation is not the reference view; the bias is whatever
+    // orientation the user calls "forward", captured on R.
+    if keys.just_pressed(KeyCode::KeyR) {
+        bias.0 = unnorm;
+        // Drop the smoothing history: with no previous sample the first biased
+        // pose is emitted as-is, landing on the reference in one frame rather
+        // than slerping there over SMOOTH_TAU_S.
+        *last_applied = None;
+    }
+    // Left-multiply the inverse: `a * b` applies b then a, so this re-zeros in
+    // the world frame. Right-multiplying would offset in the puck's own body
+    // frame, where the bias is meaningless once the device has turned.
+    let biased = bias.0.conjugate() * unnorm;
     let alpha = (1.0 - (-time.delta_secs() / SMOOTH_TAU_S).exp()).clamp(0.0, 1.0);
     let q_out = match *last_applied {
-        Some(p) => p.slerp(unnorm, alpha),
-        None => unnorm,
+        Some(p) => p.slerp(biased, alpha),
+        None => biased,
     }
     .normalize();
 
@@ -923,6 +952,68 @@ mod tests {
         );
         assert_eq!(pick_puck_port(&[native, bridge]), Some("/dev/ttyACM2"));
         assert_eq!(pick_puck_port(&[]), None);
+    }
+
+    // The recenter key has no wire bytes to pin, so run the real system and read
+    // the rig: without R the rig is the pose; on R it becomes the reference view
+    // and stays in that frame afterwards. The last step is what pins the bias to
+    // the LEFT of the pose — a right-multiplied bias is identical at the press
+    // and different forever after.
+    #[test]
+    fn r_recenters_the_rig_and_poses_afterwards_are_relative_to_it() {
+        let pose = |seq: u32, q: Quat| Pose {
+            seq,
+            stamp: 0,
+            q,
+            gyro: Vec3::ZERO,
+        };
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins);
+        app.init_resource::<ButtonInput<KeyCode>>();
+        app.init_resource::<ViewBias>();
+        let (tx, rx) = crossbeam_channel::bounded::<Pose>(4);
+        app.insert_resource(SerialLink { pose_rx: rx });
+        let rig = app.world_mut().spawn((LookRig, Transform::IDENTITY)).id();
+        app.add_systems(Update, update);
+        // The smoothing slerp needs real time to converge; 50 ms a frame makes
+        // it settle in two, so the assertions below are about the bias, not tau.
+        let step = |app: &mut App, pose: Pose| {
+            tx.try_send(pose).unwrap();
+            thread::sleep(Duration::from_millis(50));
+            app.update();
+        };
+        let rotation = |app: &App| app.world().entity(rig).get::<Transform>().unwrap().rotation;
+
+        let turned = Quat::from_rotation_y(0.7);
+        step(&mut app, pose(1, turned));
+        assert!(rotation(&app).angle_between(turned) < 2e-3, "{:?}", rotation(&app));
+
+        // R: the orientation the puck is in now becomes the reference view.
+        let pressed = Quat::from_rotation_x(-0.4) * turned;
+        let keys = &mut app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+        keys.press(KeyCode::KeyR);
+        step(&mut app, pose(2, pressed));
+        assert!(
+            rotation(&app).angle_between(Quat::IDENTITY) < 2e-3,
+            "{:?}",
+            rotation(&app)
+        );
+
+        // Released: a later pose shows up as what it differs from the captured
+        // one by, composed on the left (world frame), and settles there.
+        let keys = &mut app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+        keys.release(KeyCode::KeyR);
+        keys.clear();
+        let later = Quat::from_rotation_z(0.25) * pressed;
+        for seq in 3..6 {
+            step(&mut app, pose(seq, later));
+        }
+        let expected = pressed.conjugate() * later;
+        assert!(
+            rotation(&app).angle_between(expected) < 2e-3,
+            "{:?} != {expected:?}",
+            rotation(&app)
+        );
     }
 
     #[test]
