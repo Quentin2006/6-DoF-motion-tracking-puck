@@ -11,7 +11,6 @@ struct VideoStats {
   uint32_t frames; // JPEGs decoded and painted since the last call
   uint32_t drops;  // frames the assembler abandoned (a lost or misordered fragment)
   uint32_t bad;    // frames JPEGDEC rejected (open, decode, or wrong geometry)
-  uint32_t nomask; // frames painted without their dirty-tile mask (painted in full)
   uint32_t kb;     // Serial RX bytes since the last call, in KiB
 };
 
