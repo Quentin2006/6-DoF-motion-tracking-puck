@@ -62,11 +62,20 @@ constexpr int TFT_W = 240;
 constexpr int TFT_H = 320;
 // Per-panel mounting, in the same order as the chip selects (0 = TFT_CS,
 // 1 = TFT_CS2): both modules run landscape at 90 deg CW from portrait
-// (rotation 1), but panel 0 is mounted the other way up, so it takes rotation
+// (rotation 1), but panel 1 is mounted the other way up, so it takes rotation
 // 3 — the same landscape window with both axes flipped, i.e. 180 deg from
-// panel 1. Indexing the rotation keeps the mount a fact of this file instead
+// panel 0. Indexing the rotation keeps the mount a fact of this file instead
 // of a property of the drawing code.
-constexpr uint8_t TFT_ROTATION[2] = {3, 1};
+//
+// Both panels read 180 deg from where the modules are bolted (the headset is
+// worn the other way up): rotation 1 and 3 are Adafruit's MY|MV and MX|MV, which
+// differ by reversing both axes, so rotation ^ 2 is a 180 deg flip of the image.
+// The flip is free and exact — 1 and 3 share the same 320x240 logical window and
+// init(240, 320) leaves _colstart/_rowstart at 0, so nothing shifts by a pixel —
+// and the rect/tile geometry is unaffected: a 180 deg flip maps the 16x16 tile
+// grid onto itself and leaves a rect's eye-local coordinates meaning what they
+// meant. A 90 deg rotation would move the tiles instead and is not available.
+constexpr uint8_t TFT_ROTATION[2] = {1, 3};
 // 62.5 MHz: ST7789VW §7.4.3 Table 6 TSCYCW min 16 ns write cycle. Note the
 // core's integer divider on the 80 MHz APB cannot reach it — any request from
 // 40 to 70 MHz lands on the same divider and yields 40 MHz, measured at
