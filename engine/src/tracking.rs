@@ -378,6 +378,12 @@ struct VideoTx {
     prev_valid: bool,
     full_at: Instant, // when the last whole-canvas frame went out
     frame_id: u16,
+    // The persistent readback entity and the target it copies. The component is
+    // attached only while the sender can take a frame: a readback is a
+    // full-frame GPU->CPU copy, and the app renders far faster than the link, so
+    // asking for one every frame threw ~99% of that traffic away.
+    readback_entity: Entity,
+    target: Handle<Image>,
 }
 
 pub struct TrackPlugin;
@@ -385,8 +391,30 @@ pub struct TrackPlugin;
 impl Plugin for TrackPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_scene);
-        app.add_systems(Update, update);
+        app.add_systems(Update, (update, throttle_readback));
         app.add_observer(on_video_readback);
+    }
+}
+
+// Ask the GPU for a readback only when the sender can take one. The sender is
+// the pacer, so the readback rate follows the link instead of the render rate;
+// `skip` in the video log then only counts the rare race where the queue filled
+// between the check and the send.
+fn throttle_readback(
+    mut commands: Commands,
+    attached: Query<Entity, With<Readback>>,
+    video: Res<VideoTx>,
+) {
+    match (video.frame_tx.is_full(), attached.iter().next()) {
+        (true, Some(e)) => {
+            commands.entity(e).remove::<Readback>();
+        }
+        (false, None) => {
+            commands
+                .entity(video.readback_entity)
+                .insert(Readback::texture(video.target.clone()));
+        }
+        _ => {}
     }
 }
 
@@ -708,6 +736,10 @@ fn setup_scene(
         }
     });
 
+    // One persistent readback entity, with its `Readback` component attached and
+    // detached by throttle_readback() as the sender allows. Spawn once and never
+    // despawn: no entity churn, and no wasted GPU copies.
+    let readback_entity = commands.spawn_empty().id();
     commands.insert_resource(VideoTx {
         frame_tx,
         free_tx,
@@ -717,10 +749,9 @@ fn setup_scene(
         prev_valid: false,
         full_at: Instant::now(),
         frame_id: 0,
+        readback_entity,
+        target,
     });
-    // One persistent readback: the component fires every frame on its own
-    // until removed, so spawn once and never despawn — zero entity churn.
-    commands.spawn(Readback::texture(target));
 }
 
 // Readback fires when the requested texture copy completes. Copy it into a
