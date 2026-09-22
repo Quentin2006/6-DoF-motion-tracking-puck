@@ -1,6 +1,6 @@
 #include <Arduino.h>
 #include "display.h"
-#include "video.h" // VIDEO_ROTATION, VIDEO_TILE, panel_tile_x
+#include "video.h" // VIDEO_TILE, panel_tile_x
 
 namespace {
 // Chip select per panel, in the same order as tft_ (tft_[0] = panel 0).
@@ -43,8 +43,8 @@ void Display::begin() {
     // The library's own transactions (fillScreen in tick()) must run at the
     // same speed as the video burst, which sets it explicitly.
     tft_[i].setSPISpeed(TFT_SPI_FREQ);
-    // Panels are mounted landscape, matching the engine's video frame layout.
-    tft_[i].setRotation(VIDEO_ROTATION);
+    // Landscape logical space, per panel: the mounting differs (config.h).
+    tft_[i].setRotation(TFT_ROTATION[i]);
     tft_[i].fillScreen(ST77XX_BLACK);
   }
   lastColorMs_ = millis();
