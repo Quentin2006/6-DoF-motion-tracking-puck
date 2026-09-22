@@ -359,24 +359,31 @@ struct SerialLink {
 
 // Video sender queue to the puck panel over the same CDC port. The render
 // thread only copies the readback and enqueues; encoding, fragmentation and
-// pacing happen on the sender thread. frame_tx is 2-deep and the sender holds a
-// cloned Receiver, so a Full queue means one try_recv discards the older
-// (already stale) frame and the newest still gets through: latency stays under
-// one frame instead of dropping the newest.
+// pacing happen on the sender thread. frame_tx is 2-deep, and a full queue
+// means this readback is *skipped* rather than superseding the queued one:
+// `prev` is the baseline the rectangles are computed against, so it may only
+// ever be a frame the device actually painted. Skipping costs nothing (the next
+// readback simply covers a wider rectangle) while superseding would leave the
+// difference between the two frames on the panels forever — that is a smear on
+// every moving edge, not just a dropped frame.
 #[derive(Resource)]
 struct VideoTx {
     frame_tx: crossbeam_channel::Sender<Frame>,
-    discard_rx: crossbeam_channel::Receiver<Frame>,
     free_tx: crossbeam_channel::Sender<Box<[u8]>>,
     free_rx: crossbeam_channel::Receiver<Box<[u8]>>,
-    // Frames the render thread had to abandon outright (the queue was still
-    // full after discarding the oldest). Superseded frames are the pacing
-    // mechanism, not a fault, so they are not counted here.
-    dropped: Arc<AtomicU32>,
-    prev: Box<[u8]>, // previous readback, for the static-scene test
+    // Readbacks the sender was too busy to take: a load meter, not a fault —
+    // they are the pipeline settling to the frame rate the links can carry.
+    skipped: Arc<AtomicU32>,
+    prev: Box<[u8]>, // last readback *enqueued* (i.e. what the panels will show)
     prev_valid: bool,
     full_at: Instant, // when the last whole-canvas frame went out
     frame_id: u16,
+    // The persistent readback entity and the target it copies. The component is
+    // attached only while the sender can take a frame: a readback is a
+    // full-frame GPU->CPU copy, and the app renders far faster than the link, so
+    // asking for one every frame threw ~99% of that traffic away.
+    readback_entity: Entity,
+    target: Handle<Image>,
 }
 
 pub struct TrackPlugin;
@@ -384,8 +391,30 @@ pub struct TrackPlugin;
 impl Plugin for TrackPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(Startup, setup_scene);
-        app.add_systems(Update, update);
+        app.add_systems(Update, (update, throttle_readback));
         app.add_observer(on_video_readback);
+    }
+}
+
+// Ask the GPU for a readback only when the sender can take one. The sender is
+// the pacer, so the readback rate follows the link instead of the render rate;
+// `skip` in the video log then only counts the rare race where the queue filled
+// between the check and the send.
+fn throttle_readback(
+    mut commands: Commands,
+    attached: Query<Entity, With<Readback>>,
+    video: Res<VideoTx>,
+) {
+    match (video.frame_tx.is_full(), attached.iter().next()) {
+        (true, Some(e)) => {
+            commands.entity(e).remove::<Readback>();
+        }
+        (false, None) => {
+            commands
+                .entity(video.readback_entity)
+                .insert(Readback::texture(video.target.clone()));
+        }
+        _ => {}
     }
 }
 
@@ -591,11 +620,10 @@ fn setup_scene(
     // Fire-and-forget; write errors ignored. Returned buffers recycle through
     // free_tx so the steady state allocates nothing.
     let (frame_tx, frame_rx) = crossbeam_channel::bounded::<Frame>(2);
-    let discard_rx = frame_rx.clone();
     let (free_tx, free_rx) = crossbeam_channel::unbounded::<Box<[u8]>>();
     let return_tx = free_tx.clone();
-    let dropped = Arc::new(AtomicU32::new(0));
-    let dropped_tx = dropped.clone();
+    let skipped = Arc::new(AtomicU32::new(0));
+    let skipped_tx = skipped.clone();
     thread::spawn(move || {
         let mut writer = writer;
         let mut out: Vec<u8> = Vec::with_capacity(VIDEO_JPEG_MAX);
@@ -694,8 +722,8 @@ fn setup_scene(
                     enc_us as f64 / enc_n as f64 / 1000.0
                 };
                 println!(
-                    "video {sent} fps drop {} big {big} enc {enc_ms:.1} ms rects {}",
-                    dropped_tx.load(Ordering::Relaxed),
+                    "video {sent} fps skip {} big {big} enc {enc_ms:.1} ms rects {}",
+                    skipped_tx.load(Ordering::Relaxed),
                     rects_sent
                 );
                 sent = 0;
@@ -708,20 +736,22 @@ fn setup_scene(
         }
     });
 
+    // One persistent readback entity, with its `Readback` component attached and
+    // detached by throttle_readback() as the sender allows. Spawn once and never
+    // despawn: no entity churn, and no wasted GPU copies.
+    let readback_entity = commands.spawn_empty().id();
     commands.insert_resource(VideoTx {
         frame_tx,
-        discard_rx,
         free_tx,
         free_rx,
-        dropped,
+        skipped,
         prev: vec![0u8; VIDEO_W * 4 * VIDEO_H].into_boxed_slice(),
         prev_valid: false,
         full_at: Instant::now(),
         frame_id: 0,
+        readback_entity,
+        target,
     });
-    // One persistent readback: the component fires every frame on its own
-    // until removed, so spawn once and never despawn — zero entity churn.
-    commands.spawn(Readback::texture(target));
 }
 
 // Readback fires when the requested texture copy completes. Copy it into a
@@ -735,6 +765,14 @@ fn on_video_readback(readback: On<ReadbackComplete>, mut video: ResMut<VideoTx>)
     // the release early-return below keeps the live path from slicing OOB.
     debug_assert_eq!(data.len(), VIDEO_W * 4 * VIDEO_H, "readback stride changed");
     if data.len() < VIDEO_W * 4 * VIDEO_H {
+        return;
+    }
+    // The sender is the pacer. A readback it cannot take right away is not
+    // consumed at all: leaving `prev` alone means the next one is compared
+    // against the frame the device painted, so the difference widens into that
+    // next frame's rectangles instead of being lost.
+    if video.frame_tx.is_full() {
+        video.skipped.fetch_add(1, Ordering::Relaxed);
         return;
     }
     let src = &data[..VIDEO_W * 4 * VIDEO_H];
@@ -755,35 +793,32 @@ fn on_video_readback(readback: On<ReadbackComplete>, mut video: ResMut<VideoTx>)
         .try_recv()
         .unwrap_or_else(|_| vec![0u8; VIDEO_W * 4 * VIDEO_H].into_boxed_slice());
     buf.copy_from_slice(src);
-    video.prev.copy_from_slice(src);
-    video.prev_valid = true;
     if rects_n == 0 {
         let _ = video.free_tx.send(buf); // nothing changed, and no keyframe due
         return;
     }
-    if keyframe_due {
-        video.full_at = Instant::now();
-    }
     let frame = video.frame_id;
-    video.frame_id = frame.wrapping_add(1);
     match video.frame_tx.try_send(Frame {
         rgba: buf,
         rects,
         rects_n,
         id: frame,
     }) {
-        Ok(()) => {}
-        // Sender behind: supersede the queued frame — it is already stale by the
-        // time the sender would reach it — and retry, so the newest frame wins
-        // and latency stays under one frame.
+        // Only a frame the sender took becomes the baseline: `prev` is defined
+        // as "what the panels will show".
+        Ok(()) => {
+            video.prev.copy_from_slice(src);
+            video.prev_valid = true;
+            video.frame_id = frame.wrapping_add(1);
+            if keyframe_due {
+                video.full_at = Instant::now();
+            }
+        }
+        // Lost the race with the sender (it filled up in between): same deal as
+        // an early skip — leave the baseline where it was.
         Err(crossbeam_channel::TrySendError::Full(frm)) => {
-            if let Ok(old) = video.discard_rx.try_recv() {
-                let _ = video.free_tx.send(old.rgba); // recycle: never grow the pool
-            }
-            if let Err(crossbeam_channel::TrySendError::Full(frm)) = video.frame_tx.try_send(frm) {
-                video.dropped.fetch_add(1, Ordering::Relaxed);
-                let _ = video.free_tx.send(frm.rgba);
-            }
+            video.skipped.fetch_add(1, Ordering::Relaxed);
+            let _ = video.free_tx.send(frm.rgba);
         }
         // Sender gone (shutdown): return the buffer to the pool.
         Err(crossbeam_channel::TrySendError::Disconnected(frm)) => {
