@@ -60,6 +60,13 @@ constexpr int TFT_RST = 8;
 constexpr int TFT_BL = 7;
 constexpr int TFT_W = 240;
 constexpr int TFT_H = 320;
+// Per-panel mounting, in the same order as the chip selects (0 = TFT_CS,
+// 1 = TFT_CS2): both modules run landscape at 90 deg CW from portrait
+// (rotation 1), but panel 0 is mounted the other way up, so it takes rotation
+// 3 — the same landscape window with both axes flipped, i.e. 180 deg from
+// panel 1. Indexing the rotation keeps the mount a fact of this file instead
+// of a property of the drawing code.
+constexpr uint8_t TFT_ROTATION[2] = {3, 1};
 // 62.5 MHz: ST7789VW §7.4.3 Table 6 TSCYCW min 16 ns write cycle. Note the
 // core's integer divider on the 80 MHz APB cannot reach it — any request from
 // 40 to 70 MHz lands on the same divider and yields 40 MHz, measured at

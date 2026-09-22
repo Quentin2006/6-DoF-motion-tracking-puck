@@ -20,7 +20,8 @@
 constexpr int VIDEO_W = 640;
 constexpr int VIDEO_H = 240;
 constexpr int VIDEO_PANEL_W = 320; // one panel's width in canvas space
-constexpr uint8_t VIDEO_ROTATION = 1; // landscape logical space
+// (Panel mounting, including the fact that the two panels are rotated 180 deg
+// from each other, is display hardware: see TFT_ROTATION in config.h.)
 constexpr size_t VIDEO_HDR_LEN = 8;
 constexpr size_t VIDEO_FRAG_MAX = 1280;  // JPEG bytes per fragment; 8 + this = FRAME_MAX_PAYLOAD
 constexpr size_t VIDEO_JPEG_MAX = 49152; // device assembly buffer, and the largest frame accepted
