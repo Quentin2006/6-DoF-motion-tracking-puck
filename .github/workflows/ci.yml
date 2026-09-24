@@ -23,7 +23,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y pkg-config libwayland-dev libxkbcommon-dev \
-            libasound2-dev libudev-dev \
+            libasound2-dev libudev-dev libusb-1.0-0-dev \
             libx11-dev libxcursor-dev libxrandr-dev libxi-dev
       - name: Test
         run: cargo test
@@ -44,7 +44,5 @@ jobs:
       - name: Install display libs
         run: arduino-cli lib install "Adafruit GFX Library" "Adafruit ST7735 and ST7789 Library" "JPEGDEC"
       - name: Compile firmware
-        # Same FQBN as the Makefile: the bare board id selects Serial0 (UART0),
-        # while CDCOnBoot=cdc selects the HWCDC paths the repo actually ships
-        # (ARDUINO_USB_MODE=1 / ARDUINO_USB_CDC_ON_BOOT=1).
-        run: arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc device
+        # TinyUSB vendor bulk on native USB; CH343 UART remains the flash path.
+        run: arduino-cli compile --fqbn esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,UploadMode=default device

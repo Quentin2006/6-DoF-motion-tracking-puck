@@ -1,6 +1,5 @@
 #pragma once
 
-#include <cstddef>
 #include <cstdint>
 
 // ------------------------------- MPU -------------------------------
@@ -19,7 +18,7 @@ constexpr float ACCEL_LSB_O_MPS2 = 9.80665f / 4096.0f; // ±8 g
 constexpr float GYRO_LSB_TO_DPS = 1.0f / 16.4f;         // ±2000 dps
 constexpr float GRAVITY_MPS2 = 9.80665f;
 constexpr int FUSION_RATE_HZ = 500;
-constexpr unsigned long STATUS_PERIOD_MS = 1000; // 1 Hz Serial status line (Tracker::report)
+constexpr unsigned long STATUS_PERIOD_MS = 1000; // 1 Hz UART0 status line (Tracker::report)
 constexpr float DPS_TO_RPS = 3.14159265f / 180.0f; // deg/s to rad/s
 constexpr float EKF_SIGMA_GYRO = 0.002f;   // rad/s/sqrt(Hz): ±2000dps FSR stationary floor ±0.15 dps; quant 0.061 dps/LSB adds 0.018 dps rms (RSS 0.151) — negligible vs electronic noise, value holds
 constexpr float EKF_SIGMA_BG = 5.0e-06f;   // rad/s^2/sqrt(Hz): bias random walk, one decade below gyro over 100 s drift
@@ -27,25 +26,11 @@ constexpr float EKF_SIGMA_ACCEL = 0.02f;   // normalized-accel units (~0.2 m/s²
 constexpr float EKF_GATE_MAHA = 11.34f;    // chi2 3-dof 99%: reject above this
 constexpr float EKF_GATE_NORM = 0.35f;     // soft-gate scale: R deweights above this (step 5), reject far above
 constexpr float EKF_GATE_NORM_FAR = 0.70f; // 2x EKF_GATE_NORM: coast above this
+// ------------------------------- USB BULK LINK -------------------------------
+constexpr uint16_t PUCK_USB_VID = 0x303a;
+constexpr uint16_t PUCK_USB_PID = 0x1002; // TinyUSB vendor-bulk interface identity
 
-// ------------------------------- CDC LINK -------------------------------
-// Serial is the ESP32-S3 USB-Serial-JTAG peripheral (FQBN CDCOnBoot=cdc), so
-// baud is a no-op for throughput: the pipe is capped by USB delivery (~512
-// kB/s measured), not by a line rate. The RX queue must be grown before
-// Serial.begin or HWCDC creates its 256 B default — and HWCDC's ISR silently
-// discards whatever does not fit.
-//
-// It has to hold a whole frame's fragments plus a full-canvas repaint: the
-// video task decodes and paints one 640x240 JPEG (~20 ms decode + ~6 ms of
-// dirty tiles) before it reads again, but when every tile is dirty (the first
-// frame, or the first frame after the idle RGB cycle) the blit alone is ~102 ms
-// at the measured SPI rate, and at ~85 kB/s that is ~9 kB arriving while the
-// task is not reading. Measured on the puck: with 16 KB a full-repaint frame
-// overran the queue and cost 2 frames; with 32 KB the queue never approaches
-// the ceiling. Both are applied by the video task
-// (src/display/video_task.cpp), on core 0.
-constexpr unsigned long CDC_BAUD = 921600;
-constexpr size_t CDC_RX_BYTES = 32768;
+
 
 // ------------------------------- DISPLAY -------------------------------
 // ESP32-S3 pin assignments. The stereo pair shares MOSI/SCLK/DC/RST/BL and
@@ -88,12 +73,9 @@ constexpr uint32_t TFT_SPI_FREQ = 62500000;
 constexpr unsigned long DISPLAY_COLOR_PERIOD_MS = 5000; // solid RGB cycle step
 constexpr unsigned long VIDEO_IDLE_MS = 10000; // RGB cycle takes over after this long with no chunks
 
-// Video RX + panel blit task (src/display/video_task.cpp). It owns the whole
-// Serial RX path, and it is pinned to core 0 because the CDC stack pops one
-// FreeRTOS queue item per byte: at ~400 kB/s that is ~400k pops/s on whatever
-// core calls read(), and on core 1 (the Arduino loop core, where the 500 Hz
-// fusion tick lives) it starves Tracker::step(). Core 1 keeps the loop task to
-// itself; the burst cost moves to a core that has nothing else to do.
+// Video bulk RX + panel blit task. It stays pinned to core 0 so JPEG decode and
+// SPI painting never compete with the core-1 500 Hz fusion loop. BulkUsb uses
+// fixed 64-byte chunks, so receive does not perform a FreeRTOS operation per byte.
 constexpr int VIDEO_TASK_CORE = 0;
 constexpr int VIDEO_TASK_PRIO = 5;
 constexpr uint32_t VIDEO_TASK_STACK = 8192; // bytes: scratch + FrameParser + payload copy

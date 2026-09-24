@@ -3,33 +3,25 @@
 
 class Display;
 
-// Video RX + JPEG decode + panel blit (device/src/display/video_task.cpp),
-// owned by one core-0 task for the life of the firmware. The task owns Serial
-// end to end: after videoTaskStart() nothing else in the sketch may read it or
-// call Serial.begin().
+// Video bulk RX + JPEG decode + panel blit, owned by one core-0 task. It is
+// the sole BulkUsb consumer; UART0 remains independent for console I/O.
 struct VideoStats {
   uint32_t frames; // JPEGs decoded and painted since the last call
   uint32_t drops;  // frames the assembler abandoned (a lost or misordered fragment)
   uint32_t bad;    // frames JPEGDEC rejected (open, decode, or wrong geometry)
-  uint32_t kb;     // Serial RX bytes since the last call, in KiB
+  uint32_t kb;     // accepted bulk RX bytes since the last call, in KiB
+  uint32_t rxDrop; // bulk RX bytes dropped because the chunk queue was full
+  uint32_t qhi;    // maximum queued 64-byte chunks since boot
 };
 
 // Start the task, hand it the panel it will blit through, and initialize the
-// CDC from core 0. Returns once Serial is up.
-//
-// Core 0 is the point: HWCDC registers its RX interrupt with the core that
-// calls Serial.begin(), and that handler pushes one FreeRTOS queue item per
-// received byte (~400k/s at link saturation). Registered from the loop core
-// (core 1) it costs the 500 Hz fusion tick ~20%; registered from core 0 it
-// costs the fusion loop nothing.
-//
-// The task then parks until videoTaskGo(): Tracker::boot() still reads Serial
-// for the CAL6 tokens, and the panel is not up yet — nothing touches
-// `display` before then.
-void videoTaskStart(Display &display);
+// vendor-bulk endpoint. Returns true once transport initialization completes.
+// Core 0 keeps JPEG decode and SPI painting away from the core-1 fusion loop.
+// The task parks until videoTaskGo(): Tracker::boot() still owns UART0 for the
+// CAL6 tokens, and the panel is not up yet.
+bool videoTaskStart(Display &display);
 
-// Start reading Serial and blitting. Call after Tracker::boot() has returned
-// and Display::begin() has run.
+// Start consuming bulk video and blitting after boot and Display::begin().
 void videoTaskGo();
 
 // Read-and-zero the counters: per-interval deltas, printed once a second.

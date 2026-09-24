@@ -1,11 +1,8 @@
-default_fqbn: esp32:esp32:esp32s3
+default_fqbn: esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,UploadMode=default
 default_port: /dev/ttyACM0
 default_port_config:
   baudrate: 921600
-# USB port (not COM): the S3's USB-Serial-JTAG peripheral, enumerating as
-# 303a:1001; the COM port is the 1a86:55d3 UART bridge. Baud is a no-op for
-# throughput on USB-JTAG. The literal /dev/ttyACM0 below is only correct
-# while it is the sole USB-CDC node — the kernel index follows plug order,
-# so with both cables in the bridge takes ACM0. Pin the node explicitly
-# with arduino-cli's -p instead of trusting the index. The engine does not
-# read this file: it finds the native port by VID:PID.
+# UART console metadata only: /dev/ttyACM0 is the CH343 1a86:55d3 bridge used
+# for flashing, logs, and calibration. The engine opens native USB directly by
+# VID:PID 303a:1002 and does not read this file. Pin the bridge with arduino-cli's
+# -p or Makefile's PORT=<node> when tty numbering is ambiguous.

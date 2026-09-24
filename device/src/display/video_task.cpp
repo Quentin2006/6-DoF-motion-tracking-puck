@@ -1,4 +1,4 @@
-#include <Arduino.h> // first: Serial/millis + the FreeRTOS task API
+#include <Arduino.h> // first: millis + FreeRTOS task API
 
 #include "video_task.h"
 
@@ -6,17 +6,20 @@
 #include "display.h"
 #include "frame.h"
 #include "video.h"
+#include "../transport/usb_bulk.h"
 #include <JPEGDEC.h>
 #include <cstring>
 
 namespace {
 
-// Cross-core stats: the loop core reads, this task writes. A torn 32-bit read
-// at the 1 Hz boundary is harmless — these are rates, not accounting.
-volatile uint32_t gFrames = 0, gDrops = 0, gBad = 0, gBytes = 0;
+// Cross-core display counters: the loop core reads, this task writes. A torn
+// 32-bit read at the 1 Hz boundary is harmless — these are rates, not accounting.
+volatile uint32_t gFrames = 0, gDrops = 0, gBad = 0;
+uint32_t gRxByteRemainder = 0;
 
 Display *gDisplay = nullptr;
-SemaphoreHandle_t gSerialReady = nullptr;
+SemaphoreHandle_t gBulkReady = nullptr;
+volatile bool gTransportReady = false;
 volatile bool gGo = false;
 
 // All of JPEGDEC's state (including its pixel block buffer) lives in the
@@ -111,34 +114,24 @@ void videoTaskEntry(void *) {
   uint8_t payload[FRAME_MAX_PAYLOAD];
   FrameParser parser;
 
-  // CDC init happens here so its RX interrupt lands on this core (see the
-  // header). Grow the RX queue first, or HWCDC::begin creates its 256 B
-  // default and a burst overflows it. A failed grow leaves the link unable to
-  // carry a frame, so fail-stop like setup()'s MPU halt.
-  if (Serial.setRxBufferSize(CDC_RX_BYTES) != CDC_RX_BYTES) {
-    while (true) {
-      delay(1000);
-    }
-  }
-  Serial.begin(CDC_BAUD);
-  xSemaphoreGive(gSerialReady);
+  const bool ready = BulkUsb::begin();
+  gTransportReady = ready;
+  xSemaphoreGive(gBulkReady);
 
-  // boot() owns Serial until videoTaskGo() (it reads the CAL6 tokens).
+  // boot() owns UART0 until videoTaskGo() (it reads the CAL6 tokens).
   while (!gGo) {
     vTaskDelay(1);
   }
 
   for (;;) {
-    const size_t n = Serial.read(scratch, sizeof scratch);
+    const size_t n = BulkUsb::read(scratch, sizeof scratch);
     if (n == 0) {
-      // Nothing queued: yield the core (the CDC ISR and the idle task need
-      // it) and let the panel fall back to its RGB cycle — tick self-gates on
-      // VIDEO_IDLE_MS, so calling it every idle millisecond is free.
+      // Nothing queued: yield the core and let the panel fall back to its RGB
+      // cycle. tick() self-gates on VIDEO_IDLE_MS, so an idle call is free.
       vTaskDelay(1);
       gDisplay->tick(millis());
       continue;
     }
-    gBytes += n;
     for (size_t i = 0; i < n; i++) {
       uint8_t type = 0;
       uint16_t len = 0;
@@ -185,29 +178,33 @@ void videoTaskEntry(void *) {
 
 } // namespace
 
-void videoTaskStart(Display &display) {
+bool videoTaskStart(Display &display) {
   gDisplay = &display;
-  gSerialReady = xSemaphoreCreateBinary();
+  gBulkReady = xSemaphoreCreateBinary();
+  if (gBulkReady == nullptr) {
+    return false;
+  }
   if (xTaskCreatePinnedToCore(videoTaskEntry, "video", VIDEO_TASK_STACK, nullptr, VIDEO_TASK_PRIO,
                               nullptr, VIDEO_TASK_CORE) != pdPASS) {
-    // Fail-stop, like setup()'s MPU halt: nothing can report this yet, because
-    // the task that was going to initialize Serial is the one that failed.
-    while (true) {
-      delay(1000);
-    }
+    return false;
   }
-  xSemaphoreTake(gSerialReady, portMAX_DELAY);
+  xSemaphoreTake(gBulkReady, portMAX_DELAY);
+  return gTransportReady;
 }
 
 void videoTaskGo() { gGo = true; }
 
 VideoStats videoTakeStats() {
-  VideoStats s;
+  VideoStats s = {};
   s.frames = gFrames;
   s.drops = gDrops;
   s.bad = gBad;
-  s.kb = gBytes >> 10;
+  const BulkUsbStats bulk = BulkUsb::takeStats();
+  const uint32_t rxBytes = gRxByteRemainder + bulk.rxBytes;
+  s.kb = rxBytes >> 10;
+  s.rxDrop = bulk.rxOverflowBytes;
+  s.qhi = bulk.rxQueueHighWaterChunks;
   gFrames = gDrops = gBad = 0;
-  gBytes -= s.kb * 1024; // keep the sub-KiB remainder across intervals
+  gRxByteRemainder = rxBytes & 1023U;
   return s;
 }

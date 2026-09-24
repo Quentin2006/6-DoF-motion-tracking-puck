@@ -3,9 +3,9 @@
 #include <cstdint>
 #include <cstring>
 
-// Framed byte-stream contract over the single USB-CDC port (Serial).
-// Logs (Serial.println/printf) share the port unframed; the parser skips any
-// bytes that do not form a valid frame, so logs and frames coexist.
+// Framed byte-stream contract over the TinyUSB vendor-bulk pipe. UART0 console
+// logs are unframed on a separate transport; the parser skips bulk bytes that do
+// not form a valid frame, so benchmark noise and overflow can resynchronize it.
 //
 // Frame: magic 0x55 0xAA | type u8 | len u16 LE | payload[len] | crc u16 LE.
 // CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF) over type + len bytes +

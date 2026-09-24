@@ -1,10 +1,9 @@
-.PHONY: all clean lsp compile upload monitor engine device test
-FQBN ?= esp32:esp32:esp32s3:CDCOnBoot=cdc
-# Firmware port. The puck's own USB port (USB-Serial-JTAG) gets a stable
-# /dev/serial/by-id node whatever order things were plugged in — the ttyACM
-# index does not. Fall back to the historical literal, which is where a
-# bridge-only (1a86:55d3) setup enumerates. Override with PORT=<node>.
-PORT ?= $(firstword $(wildcard /dev/serial/by-id/usb-Espressif_USB_JTAG_*) /dev/ttyACM0)
+.PHONY: all clean lsp compile upload monitor usb-permissions engine device test
+FQBN ?= esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,UploadMode=default
+# CH343 UART bridge for flashing, logs, and calibration. The native USB-OTG
+# connector is owned by the engine's vendor-bulk link and never appears as a
+# tty device. Override with PORT=<node>.
+PORT ?= $(firstword $(wildcard /dev/serial/by-id/usb-1a86_USB_Single_Serial_*-if00) /dev/ttyACM0)
 
 all: compile upload engine
 clean:
@@ -15,6 +14,10 @@ upload:
 	arduino-cli upload --fqbn $(FQBN) -p $(PORT) device
 monitor:
 	arduino-cli monitor -p $(PORT) device
+usb-permissions:
+	sudo install -m 0644 engine/udev/99-puck-usb.rules /etc/udev/rules.d/99-puck-usb.rules
+	sudo udevadm control --reload-rules
+	sudo udevadm trigger --subsystem-match=usb --attr-match=idVendor=303a --attr-match=idProduct=1002
 device: compile upload monitor
 lsp:
 	arduino-cli compile --clean --fqbn $(FQBN) --only-compilation-database --build-path ./build ./device/

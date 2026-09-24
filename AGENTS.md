@@ -4,13 +4,11 @@
 
 A 6-DoF motion-tracking puck. An ESP32-S3 puck reads an MPU6050 IMU, fuses
 accelerometer + gyroscope into a 6-DoF orientation quaternion with a 6-state
-EKF, and streams the pose as framed CDC-serial packets (~250 Hz) to a
-Rust/Bevy desktop engine. The engine opens the puck serial port, parses the
-frames, and drives a **look-around camera rig** — the puck's orientation maps
-directly to camera rotation, so the user moves the puck and the 3D view
-follows. The rig carries **two eye cameras** (parallel stereo, `IPD_M` apart)
-that render into the two halves of a 640x240 target, and the engine streams
-that stereo pair back down the same port to the headset's two panels.
+EKF, and streams framed pose packets (~250 Hz) over a native USB TinyUSB
+vendor-bulk link to a Rust/Bevy desktop engine. The engine claims that one USB
+interface, parses the frames, drives a **look-around camera rig**, and sends
+the rendered stereo pair back over the same bulk interface. The CH343 COM/UART
+bridge is separate and remains dedicated to flashing, logs, and calibration.
 
 Two independent halves, no shared code, wired together by a single root
 `Makefile` and hand-maintained constant agreement:
@@ -30,16 +28,16 @@ Two independent halves, no shared code, wired together by a single root
    ├─ Ekf6Dof::predict(gyro rad/s) → Ekf6Dof::updateAccel(accel)  [gated → gated_++]
    └─ wrap to display quat  (fixed ±90° X sandwich, right-multiply)
    ▼
- device.ino loop() → UsbLink::sendQuat(quat, gyro)
+device.ino loop() → BulkLink::sendQuat(quat, gyro)
    │  FRAME_POSE frame: magic 0x55 0xAA | type u8 | len u16 LE | 36 B payload | crc u16 LE
    │  payload: seq u32 | stamp u32 | quat xyzw f32 | gyro xyz f32  (all LE)
    ▼
- engine/src/tracking.rs::update  (serial: native USB 303a:1001 @921600, drain-to-latest)
+ engine/src/tracking.rs::update  (USB vendor bulk 303a:1002, drain-to-latest)
    ▼
  LookRig camera Transform.rotation
 ```
 
-Video runs the other way down the same port, at its own pace:
+Video runs the other way down the same bulk interface, at its own pace:
 
 ```
  Bevy 640x240 RGBA render target = stereo pair (left eye | right eye viewports)
@@ -47,7 +45,7 @@ Video runs the other way down the same port, at its own pace:
    │  jpeg-encoder q75 4:2:0, one JPEG per rectangle, concatenated in a blob
    │  FRAME_VIDEO_RECT frame: 4 B header + 11 B per rect (eye/x/y/w/h/jpeg_len)
    │  FRAME_VIDEO fragments: 8 B header (frame/frag/count/len) + <= 1280 B of blob
-   │  one fragment per slice of the 25 ms frame (never a burst: the USJ RX FIFO is 64 B)
+   │  one fragment per slice of the 25 ms frame (never a burst: bulk OUT FIFO is 64 B)
    ▼
  device/src/display/video_task.cpp  (core-0 task)
    │  VideoFragAssembler → JPEGDEC per rectangle → Display::blitTile per 16x16 tile
@@ -63,41 +61,42 @@ keyframe is the only thing that does). Measured: 45 dirty tiles of ~45 tiles of
 rectangle area per frame, i.e. the bounding boxes are tight, and the blit — at
 0.17 ms per 16x16 tile — is what is left of the budget.
 
-40 fps is the measured device capacity, not a guess: per frame the video task
-spends ~12-15 ms in paint (decode + blit of the rectangles) and ~3-4 ms reading
-and parsing, so ~70% duty at 40 fps with the RX queue empty (`avail` ~300 B).
-Pushing the same traffic to 60 fps nearly doubles the per-second work — the
-dirty-tile count per frame is roughly constant whatever the interval, not
-proportional to it — and the queue saturates (`drop 4-8`). The device does hold
-60 fps cleanly on lighter rectangles, so `VIDEO_TARGET_FPS` is the one knob.
+40 fps is the measured painted capacity, not a transport promise: each frame
+spends roughly 12-15 ms decoding/blitting dirty rectangles plus 3-4 ms reading
+and parsing. The vendor-bulk cutover leaves the 1,280-byte fragments and 25-ms
+pacing unchanged, so extra USB bandwidth does not raise this ceiling. Sending
+the same per-frame work at 60 fps still exceeds the device budget; benchmark
+throughput is raw transport headroom, not a 60-fps panel guarantee.
 
 **Key modules (`device/`)**
 
 | File | Role |
 |---|---|
-| `device.ino` | Orchestrator: `setup()` `videoTaskStart()` (core-0 CDC init) → init/calib → `videoTaskGo()`, `loop()` (tick → send → report → video counters) |
-| `config.h` | Single source of all compile-time constants (pins, FSR, gravity, CDC framing, all EKF sigmas/gates, axis map, display pins) |
+| `device.ino` | Orchestrator: `setup()` `videoTaskStart()` (core-0 bulk init) → init/calib → `videoTaskGo()`, `loop()` (tick → send → UART0 report → video counters) |
+| `config.h` | Single source of compile-time constants (pins, FSR, gravity, USB VID/PID, EKF sigmas/gates, axis map, display pins) |
 | `src/position/tracker.{h,cpp}` | Pipeline glue + `micros()` scheduler + CAL6 accelerometer calibration + 1 Hz status line; owns `Mpu6050`, `Ekf6Dof`, `StillDetector` |
 | `src/position/mpu6050.{h,cpp}` | I2C driver + NVS accel-cal persistence (`Preferences`, namespace `mpu`, keys `ax0-2`/`as0-2`) |
 | `src/position/fusion.{h,cpp}` | `Ekf6Dof` — 6-state EKF (quat w,x,y,z + gyro bias) |
 | `src/position/still_detect.{h,cpp}` | `StillDetector` — gyro re-bias while stationary (50-tick window, variance/norm gates) |
-| `link.{h,cpp}` | USB-CDC pose-out link (`Serial`): FRAME_POSE frames, sequence counter |
-| `frame.h` | Framed CDC byte-stream contract (magic/type/len/CRC) — host-compilable, parsed by `link.cpp`/`video_task.cpp` and `engine/src/tracking.rs` |
+| `src/transport/usb_bulk.{h,cpp}` | TinyUSB vendor descriptor, 64-byte chunk queue, bulk read/write/flush, and interval transport statistics |
+| `link.{h,cpp}` | `BulkLink` pose producer: complete `FRAME_POSE` writes + sequence counter |
+| `frame.h` | Framed bulk byte-stream contract (magic/type/len/CRC) — host-compilable, parsed by `link.cpp`/`video_task.cpp` and `engine/src/tracking.rs` |
 |`src/display/display.{h,cpp}`|Two-panel ST7789 driver: `blitTile(panel, x, y, px)` picks the chip select per tile, one shared SPI transaction per frame, idle RGB cycle on both panels|
-|`src/display/video_task.{h,cpp}`|Core-0 task owning the whole Serial path: CDC init (so its RX interrupt runs on core 0), the rectangle table + blob reassembly, JPEGDEC per rectangle + tile blit, 1 Hz `vid/drop/bad/kb` counters|
+|`src/display/video_task.{h,cpp}`|Core-0 task owning `BulkUsb` receive: rectangle table + blob reassembly, JPEGDEC per rectangle + tile blit, 1 Hz display/transport counters|
 |`src/display/video.h`|Video wire contract: stereo canvas geometry, the dirty-rectangle table + `parse_video_rects_hdr`, the JPEG fragment header + `VideoFragAssembler` — host-compilable, mirrored by `engine/src/tracking.rs`|
 | `packet.h` | Canonical 36 B pose payload + `build_quat_packet()` — host-compilable, single source of the byte contract |
 
-**Key module (`engine/`)**
+**Key modules (`engine/`)**
 
 | File | Role |
 |---|---|
-| `src/main.rs` | `App::new().add_plugins(DefaultPlugins).add_plugins(TrackPlugin).run()` |
-|`src/tracking.rs`|All behavior: `SerialLink`/`VideoTx` resources, `LookRig` marker with two viewport eye cameras (IPD), `TrackPlugin`, `update` ECS system, serial reader + dirty-rectangle crop/encode/fragment/paced sender thread, `ViewBias` recenter state + the `R` key binding in `update`|
+| `src/main.rs` | Dispatches the optional raw benchmark, then starts the Bevy app |
+|`src/usb_bulk.rs`|One claimed `rusb` handle behind `Arc`, descriptor endpoint selection, timed bulk I/O, and the 10-second benchmark|
+|`src/tracking.rs`|`PuckLink`/`VideoTx` resources, `LookRig` stereo cameras, `TrackPlugin`, pose update/recenter, bulk reader, dirty-rectangle JPEG sender, and video logs|
 
 **Cross-file wire contract (edit both halves together).** `device/frame.h`,
 `device/packet.h`, `device/src/display/video.h` and `engine/src/tracking.rs`
-hard-code the same framed-CDC protocol by hand; there is no shared crate or
+hard-code the same framed bulk protocol by hand; there is no shared crate or
 serializer. The 36-byte pose payload (`QUAT_PACKET_LEN_V2`) inside a
 `FRAME_POSE` frame, the `FRAME_VIDEO_MASK` dirty-tile mask, and the 640×240
 baseline-JPEG stereo-pair fragments (`VIDEO_*`), **must match in both halves**.
@@ -131,7 +130,7 @@ assert the same bytes and the same tile-bit mapping as `tests/video_test.cpp`.
 
 The packet byte layout is **canonical in `device/packet.h`**
 (`build_quat_packet`, host-compilable, no Arduino deps); `link.cpp`
-(`UsbLink::sendQuat`) calls it and names `QUAT_PACKET_LEN_V2` directly. The committed `tests/packet_fixture.txt`
+(`BulkLink::sendQuat`) calls it and names `QUAT_PACKET_LEN_V2` directly. The committed `tests/packet_fixture.txt`
 is the single source of truth and is asserted by **both** halves — the C++ host
 test (`tests/packet_test.cpp`, producer) and the Rust parser test
 (`tracking.rs`, consumer). Changing the packet layout means updating
@@ -155,34 +154,36 @@ chains: **`arduino-cli`** (device) and **`cargo`** (engine). `clangd`/`.clangd`
 is editor IntelliSense only — it does not compile or flash.
 
 ```bash
-make compile          # build firmware only: arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc device
-make upload           # flash to $(PORT): arduino-cli upload --fqbn $(FQBN) -p $(PORT) device
-make monitor          # serial monitor on $(PORT) @921600 (device/sketch.yaml baud)
-make device           # compile + upload + monitor  (interactive loop)
-make engine           # cd engine && cargo run      (host Bevy visualizer)
-make all              # compile + upload + engine   (full pipeline)
-make clean            # arduino-cli compile --clean --fqbn $(FQBN) device
-make lsp              # regenerate + rewrite compile_commands.json for clangd
-make test             # cargo test (engine) + host contract tests (packet, framing, video fragments + dirty rects)
+make usb-permissions   # one-time udev install/reload for native 303a:1002
+make compile           # arduino-cli compile with explicit USB-OTG TinyUSB FQBN
+make upload            # flash to CH343 $(PORT); PORT=<node> overrides
+make monitor           # CH343 UART0 logs and CAL6 interaction
+make device            # compile + CH343 upload + CH343 monitor
+make engine            # native USB vendor-bulk Bevy visualizer
+make all               # compile + CH343 upload + bulk engine
+make clean             # arduino-cli compile --clean --fqbn $(FQBN) device
+make lsp               # regenerate + rewrite compile_commands.json for clangd
+make test              # Rust + packet/framing/video host contract tests
 ```
 
-- **FQBN** default `esp32:esp32:esp32s3:CDCOnBoot=cdc` (in `Makefile` `?=` and `device/sketch.yaml`); override with `make compile FQBN=<other>`.
-- **Engine port:** the native-USB puck — selected by USB VID:PID `303a:1001` from `serialport::available_ports()`, because the `ttyACM<n>` index depends on plug order (bridge `1a86:55d3` + native both plugged ⇒ native is not `ttyACM0`). `PUCK_SERIAL` overrides with any explicit node. **Baud** 921600 (native-CDC baud is don't-care). Firmware flash/monitor uses `Makefile`'s `PORT`, which resolves the same way order-independently (`/dev/serial/by-id/usb-Espressif_USB_JTAG_*`) and falls back to the literal `/dev/ttyACM0` (the UART bridge, where a bridge-only setup enumerates); override with `make upload PORT=<node>`.
+- **FQBN** default `esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,UploadMode=default` (in `Makefile` and `device/sketch.yaml`); override with `make compile FQBN=<other>`.
+- **Native link:** the engine claims exact USB `303a:1002`, auto-detaches any kernel driver, and selects the unique class-`0xff` interface with one bulk IN/OUT pair. `make usb-permissions` installs `engine/udev/99-puck-usb.rules`; replug native USB afterward.
+- **Console/flashing:** `PORT` prefers `/dev/serial/by-id/usb-1a86_USB_Single_Serial_*-if00`, falls back to `/dev/ttyACM0`, and is independent of the native bulk device.
 - `make engine` from repo root, or `cargo run` from `engine/`.
 - `make lsp` = compile with `--only-compilation-database --build-path ./build`, then a `jq` rewrite that maps `build/sketch/` → `device/`, renames `.ino.cpp` → `.ino`, injects `-x c++` on `.ino` files, and strips `-MMD`/`-o`/object args. The `.clangd` compiler/sysroot override handles toolchain include discovery.
 
 ## Code Conventions & Common Patterns
 
 **C++ (device/)**
-- Classes `PascalCase` (`Tracker`, `Ekf6Dof`, `Mpu6050`, `StillDetector`, `UsbLink`, `Display`); methods/members `camelCase`; private members trailing `_` (`quat_`, `pktSeq_`, `lastTickUs_`).
+- Classes `PascalCase` (`Tracker`, `Ekf6Dof`, `Mpu6050`, `StillDetector`, `BulkLink`, `BulkUsb`, `Display`); methods/members `camelCase`; private members trailing `_` (`quat_`, `pktSeq_`, `lastTickUs_`).
 - Constants: `UPPER_SNAKE` for macros/constexpr (`SDA_PIN`, `FUSION_RATE_HZ`, `EKF_GATE_MAHA`); `k`-prefixed class-private `static constexpr` (`kWinTicks`, `kAlpha`).
 - **Error handling:** deterministic fail-stop — `setup()` hangs in `while(true) delay()` if MPU init fails; no soft degradation. NVS accel-cal is fault-tolerant (missing → identity defaults, silent no-op). CAL6 is abort-safe (only the SAVE writes NVS). NaN treated as failure via `!(x < th)` / `== 0` guards.
 - **Filter tuning:** EKF sigmas/gates live in `config.h`; comments say to tune constants rather than touch the filter code.
 - `config.h` display pins are **FIXED** (`TFT_MOSI=11 TFT_SCLK=12 TFT_CS=10 TFT_DC=9 TFT_RST=8`) with extensive comments on hardware traps — do not move them. `TFT_BL=7` is driven HIGH once in `Display::begin()` (backlight on).
 
-- Minimal crate: no `lib.rs`, no modules beyond `tracking`, no async, no serde — just Bevy + `crossbeam-channel` + `serialport` + `jpeg-encoder`.
+- Minimal crate: no `lib.rs`, no async, no serde — just Bevy + `crossbeam-channel` + `rusb` + `jpeg-encoder`.
 - Bevy idioms: `#[derive(Resource)]` / `#[derive(Component)]`, `Plugin` trait, function-based `app.add_systems(Startup/Update, ...)`, `Single<&mut Transform, With<LookRig>>`, `Local<T>` for per-frame scratch.
-- Crash-fast errors: `unwrap_or_else(|e| panic!(...))` on serial open/clone; reader thread drops malformed frames, pose queue oldest-drops when full. No `Result` ergonomics / `thiserror` / `anyhow`.
+- Crash-fast startup: `BulkLink::open()` panics with the exact USB/interface/endpoint error; reader timeouts idle normally, other I/O failures stop the affected worker. The pose queue oldest-drops when full. No `thiserror` / `anyhow`.
 - Explicit little-endian parsing (`f32::from_le_bytes`, `u32::from_le_bytes`), `#[inline]` micro-helpers.
 - Comments are terse, explain *why* (e.g. drain-to-latest is not packet loss at ~4 packets/frame).
 
@@ -190,18 +191,19 @@ make test             # cargo test (engine) + host contract tests (packet, frami
 
 - `device/config.h` — every compile-time constant and the wire-contract sizes. The file any hardware/fusion change lands in.
 - `device/packet.h` — canonical 36 B pose payload + `build_quat_packet()`; the byte contract's single source (host-testable).
-- `device/frame.h` — framed-CDC contract (magic/type/len/CRC + `FrameParser`); parsed by `video_task.cpp` and the engine reader.
+- `device/frame.h` — framed bulk contract (magic/type/len/CRC + `FrameParser`); parsed by `video_task.cpp` and the engine reader.
 - `device/src/display/video.h` — the stereo canvas geometry, the dirty-rectangle table + parser, and the JPEG fragment layout + `VideoFragAssembler`; the video wire contract's single source (host-testable).
-- `device/src/display/video_task.cpp` — the only `Serial` reader and the only panel writer: core-0 RX, rectangle table + blob reassembly, per-rectangle JPEG decode, per-tile blit.
-- `device/device.ino` — the boot + loop sequencing (init → calib → CAL6 gate → start → stream).
-- `device/src/position/tracker.cpp` — the per-tick pipeline (scheduler, axis remap, still-detect nudge, EKF predict/update, display-quat wrap).
+- `device/src/transport/usb_bulk.cpp` — TinyUSB interface registration, static chunk queue, host-to-device RX accounting, complete-frame TX, and interval stats.
+- `device/src/display/video_task.cpp` — the only `BulkUsb` reader and the only panel writer: core-0 RX, rectangle table + blob reassembly, per-rectangle JPEG decode, per-tile blit.
+- `device/device.ino` — the boot + loop sequencing (bulk init → UART0 calibration → display ready → stream).
+- `engine/src/usb_bulk.rs` — shared `rusb` handle, descriptor endpoint selection, timed bulk I/O, and raw benchmark.
 - `engine/src/tracking.rs` — the packet parser, prediction/smoothing, MJPEG sender (encode → fragment → paced write), and camera rig.
 - `Makefile` — the whole build/dev entry surface.
 
 ## Runtime / Tooling Preferences
 
 - **Device toolchain:** `arduino-cli` with ESP32 core (had `3.3.11` at `~/.arduino15/packages/esp32/hardware/esp32/`), xtensa toolchain `esp-x32/2601`. Not PlatformIO.
-- **Secrets:** `device/secrets.h` is **gitignored and unused by the firmware** (no includer; transport is USB-CDC, no WiFi). If it exists locally, never commit it.
+- **Secrets:** `device/secrets.h` is **gitignored and unused by the firmware** (no includer; transport is USB, no WiFi). If it exists locally, never commit it.
 - **`compile_commands.json` is generated** (`make lsp`); never hand-edit it. Regenerate after changing a sketch source or arduino-cli options — it is what makes clangd handle `.ino` files (via injected `-x c++`).
 - `RFC 2119`-style MUSTs above follow from these facts.
 
@@ -270,25 +272,14 @@ verification stays manual.
   firmware).
 
 - **CI (`.github/workflows/ci.yml`)** runs `cargo test` on the engine and
-  `arduino-cli compile --fqbn esp32:esp32:esp32s3:CDCOnBoot=cdc device` on the
-  firmware (same FQBN as the Makefile; it also installs the Adafruit display libs
+  `arduino-cli compile --fqbn esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,UploadMode=default device` on the
+  firmware (same FQBN as the Makefile; it installs libusb plus the Adafruit display libs
   and JPEGDEC). No secrets step: the firmware compiles without `device/secrets.h`.
 
 **Still manual / no automation:**
 - **Compile gate** locally: `make compile` — keep green after any `device/` change.
-- **On-device:** `make upload` + `make monitor` = the interactive loop. The serial
-  CAL6 procedure (`Tracker::maybeRunAccelCal` / `runAccelCal` in `src/position/tracker.cpp`)
-  calibrates the accelerometer (6 poses); `src/position/still_detect.cpp` re-biases
-  gyro while still. The onboard LED goes red→green once streaming; the 1 Hz
-- **Host render:** `make engine` opens the puck serial port (native USB
-  `303a:1001` @921600, or `PUCK_SERIAL=<port>` to pin one) and renders the rig.
-  Engine side: `video 40 fps drop 0 big 0 enc 0.0 ms rects ~80` (rectangles per
-  second: two per frame) and no `seq gap:` line. Device side (1 Hz, on the same
-  port): `vid 40 drop 0 bad 0 kb ~70`. `drop > 0` is lost bytes in the RX queue
-  (lower the target), `bad > 0` a frame the device refused — a table it cannot
-  paint or a rectangle that did not decode at its declared size. `R` is the only
-  keyboard binding: it recenters the view, so the puck's orientation at the
-  press becomes the reference.
+- **On-device:** `make upload` + `make monitor` use the CH343 COM/UART console. The serial CAL6 procedure (`Tracker::maybeRunAccelCal` / `runAccelCal` in `src/position/tracker.cpp`) calibrates the accelerometer (6 poses); `src/position/still_detect.cpp` re-biases gyro while still. The onboard LED goes red→green once streaming.
+- **Host render:** `make engine` opens native USB `303a:1002` and renders the rig. Engine side: `video 40 fps ... txerr 0` and no `seq gap:` line. Device side over CH343: `vid 40 drop 0 bad 0 ... rxdrop 0`. `drop > 0` is an abandoned video frame, `bad > 0` is a frame the device refused, and `rxdrop > 0` is bulk RX queue overflow. `R` is the only keyboard binding: it recenters the view, so the puck's orientation at the press becomes the reference.
 
 There is **no** unit coverage for `Ekf6Dof`, `StillDetector`, or `Mpu6050` — they
 are hardware-coupled and the serial/calibration path is their real test. Add a

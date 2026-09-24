@@ -4,7 +4,7 @@
 
 // "… off x y z scale x y z" — shared by the boot report and the CAL6 solve.
 static void printCal(const char *prefix, const float off[3], const float scale[3]) {
-  Serial.printf("%s off %.4f %.4f %.4f scale %.4f %.4f %.4f\n", prefix, off[0], off[1],
+  Serial0.printf("%s off %.4f %.4f %.4f scale %.4f %.4f %.4f\n", prefix, off[0], off[1],
                 off[2], scale[0], scale[1], scale[2]);
 }
 
@@ -16,8 +16,8 @@ static bool waitForToken(const char *want, unsigned long timeoutMs) {
   buf[0] = '\0';
   const unsigned long t0 = millis();
   while ((unsigned long)(millis() - t0) < timeoutMs) {
-    while (Serial.available() > 0 && n + 1 < sizeof buf) {
-      const char c = (char)Serial.read();
+    while (Serial0.available() > 0 && n + 1 < sizeof buf) {
+      const char c = (char)Serial0.read();
       if (c == '\n' || c == '\r') {
         if (n > 0) {
           return strcmp(buf, want) == 0;
@@ -38,19 +38,19 @@ static void runAccelCal(Mpu6050 &mpu) {
   static const char *kPose[6] = {"+X", "-X", "+Y", "-Y", "+Z", "-Z"};
   vec3 means[6];
   for (int p = 0; p < 6; ++p) {
-    Serial.printf("CAL6 pose %s down: hold still, send G\n", kPose[p]);
+    Serial0.printf("CAL6 pose %s down: hold still, send G\n", kPose[p]);
     if (!waitForToken("G", 120000UL)) {
-      Serial.println("CAL6 aborted, nothing saved");
+      Serial0.println("CAL6 aborted, nothing saved");
       return;
     }
     // Raw mean (~200 samples @5 ms, bypassing all driver-side accel cal).
     vec3 mean;
     if (!mpu.meanRawAccel(mean)) {
-      Serial.println("CAL6 aborted, nothing saved (no samples)");
+      Serial0.println("CAL6 aborted, nothing saved (no samples)");
       return;
     }
     means[p] = mean;
-    Serial.printf("CAL6 mean %s %.4f %.4f %.4f\n", kPose[p], mean.x, mean.y, mean.z);
+    Serial0.printf("CAL6 mean %s %.4f %.4f %.4f\n", kPose[p], mean.x, mean.y, mean.z);
   }
   float off[3], scale[3];
   for (int i = 0; i < 3; ++i) {
@@ -61,21 +61,21 @@ static void runAccelCal(Mpu6050 &mpu) {
     const float mx = a > b ? a : b;
     const float mn = a < b ? a : b;
     if ((mx - mn) < 1e-6f) {
-      Serial.println("CAL6 aborted, nothing saved (degenerate span)");
+      Serial0.println("CAL6 aborted, nothing saved (degenerate span)");
       return;
     }
     off[i] = (mx + mn) * 0.5f;
     scale[i] = 2.0f * GRAVITY_MPS2 / (mx - mn);
   }
   printCal("CAL6 solved", off, scale);
-  Serial.println("CAL6 send SAVE to flash, anything else aborts");
+  Serial0.println("CAL6 send SAVE to flash, anything else aborts");
   if (!waitForToken("SAVE", 120000UL)) {
-    Serial.println("CAL6 aborted, nothing saved");
+    Serial0.println("CAL6 aborted, nothing saved");
     return;
   }
   mpu.setAccelCal(off, scale);
   mpu.getAccelBias(); // re-seed the runtime offset residual
-  Serial.println("CAL6 saved; reboot");
+  Serial0.println("CAL6 saved; reboot");
 }
 
 // Driver -> body swizzle: body=(sz,sy,sx). Sensor +X (up, ~9.8 at rest) lands
@@ -107,14 +107,14 @@ bool Tracker::boot() {
     return false;
   }
   delay(500);
-  Serial.println("calibrating...");
+  Serial0.println("calibrating...");
   mpu_.getAccelBias();
   mpu_.getGyroBias();
-  Serial.println("calibrated");
+  Serial0.println("calibrated");
   float off[3], scale[3];
   mpu_.getAccelCal(off, scale);
   printCal("accCal", off, scale);
-  Serial.println("send CAL6 within 5 s for accel cal");
+  Serial0.println("send CAL6 within 5 s for accel cal");
   maybeRunAccelCal(mpu_, 5000UL);
   vec3 gb;
   mpu_.readGyro(gb); // seed only; first loop() tick is a clean skip anyway
@@ -132,7 +132,7 @@ void Tracker::report(uint32_t seq) {
   lastReportMs_ = now;
   float bx, by, bz;
   ekf_.getBias(bx, by, bz);
-  Serial.printf("q %.4f %.4f %.4f %.4f seq %lu tick %lu over %lu gate %lu bg %.6f %.6f %.6f st %d\n",
+  Serial0.printf("q %.4f %.4f %.4f %.4f seq %lu tick %lu over %lu gate %lu bg %.6f %.6f %.6f st %d\n",
                 quat_[0], quat_[1], quat_[2], quat_[3], (unsigned long)seq,
                 (unsigned long)ticks_, (unsigned long)overruns_, (unsigned long)gated_,
                 bx, by, bz, still_.latched() ? 1 : 0);
@@ -157,7 +157,7 @@ bool Tracker::step() {
   const bool okA = mpu_.readAccel(accel);
   const bool okG = mpu_.readGyro(gyro);
   if (!okA || !okG) {
-    Serial.println("MPU read failed");
+    Serial0.println("MPU read failed");
     return false;
   }
   float bg[3], ba[3];
@@ -171,7 +171,7 @@ bool Tracker::step() {
     mpu_.nudgeGyroBias(mean, StillDetector::kAlpha);
   }
   if (still_.justExited()) {
-    Serial.println("still exit");
+    Serial0.println("still exit");
   }
   const float dt = 1.0f / (float)FUSION_RATE_HZ;
   ekf_.predict(bg[0] * DPS_TO_RPS, bg[1] * DPS_TO_RPS, bg[2] * DPS_TO_RPS, dt);

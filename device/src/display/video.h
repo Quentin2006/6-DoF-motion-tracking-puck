@@ -4,9 +4,8 @@
 #include <cstring>
 
 // Video wire contract: engine -> device, one stereo pair per frame, as one or
-// two baseline JPEGs covering only the rectangles that changed, cut into
-// fragments and sent as FRAME_VIDEO frames (device/frame.h) over the single
-// USB-CDC port.
+// two baseline JPEGs covering only the changed rectangles, cut into FRAME_VIDEO
+// fragments (device/frame.h) over the vendor-bulk OUT endpoint.
 //
 // Canvas: 640x240, the left eye at x in [0,320) and the right at [320,640) —
 // one panel per half. Painting is per dirty rectangle and in *eye-local*
@@ -16,10 +15,9 @@
 // which capped the panel near 31 fps however little of the frame differed.
 //
 // The sender paces fragments inside the frame interval, never a whole image at
-// once: the USB-Serial-JTAG RX FIFO is 64 B, so a burst overflows it and
-// shreds the frame (measured: 10.4 kB every 34 ms loses ~30% of its bytes, the
-// same average rate spread per fragment loses none). A fragment lost that way
-// costs exactly one frame — the next one starts clean.
+// once: the bulk OUT endpoint has a 64 B FIFO, so a burst can overflow it and
+// shred the frame. A fragment lost that way costs exactly one frame — the next
+// one starts clean.
 //
 // Panel mounting, including the fact that the two panels are rotated 180 deg
 // from each other, is display hardware: see TFT_ROTATION in config.h.
