@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <atomic>
 
 namespace {
 constexpr size_t kChunkSize = 64;
@@ -26,7 +27,8 @@ bool sBegun = false;
 
 uint8_t sReadRemainder[kChunkSize];
 uint8_t sReadRemainderLen = 0;
-volatile uint16_t sRxQueueHighWaterChunks = 0;
+std::atomic<int32_t> sRxQueueOccupancy{0};
+std::atomic<uint16_t> sRxQueueHighWaterChunks{0};
 
 volatile uint32_t sRxBytes = 0;
 volatile uint32_t sRxOverflowBytes = 0;
@@ -73,13 +75,19 @@ static void accept_vendor_rx(uint8_t itf) {
       break;
     }
     chunk.len = static_cast<uint8_t>(received);
+    // Reserve before enqueue so a consumer cannot dequeue between the queue
+    // operation and the high-water sample and under-report the peak.
+    const int32_t occupancy =
+        sRxQueueOccupancy.fetch_add(1, std::memory_order_relaxed) + 1;
+    uint16_t peak = sRxQueueHighWaterChunks.load(std::memory_order_relaxed);
+    while (occupancy > peak &&
+           !sRxQueueHighWaterChunks.compare_exchange_weak(
+               peak, static_cast<uint16_t>(occupancy), std::memory_order_relaxed)) {
+    }
     if (xQueueSend(sQueue, &chunk, 0) == pdTRUE) {
       sRxBytes += received;
-      const uint16_t occupancy = static_cast<uint16_t>(uxQueueMessagesWaiting(sQueue));
-      if (occupancy > sRxQueueHighWaterChunks) {
-        sRxQueueHighWaterChunks = occupancy;
-      }
     } else {
+      sRxQueueOccupancy.fetch_sub(1, std::memory_order_relaxed);
       sRxOverflowBytes += received;
       vTaskDelay(1);
     }
@@ -133,6 +141,7 @@ size_t BulkUsb::read(uint8_t *dst, size_t cap) {
       if (xQueueReceive(sQueue, &chunk, 0) != pdTRUE) {
         break;
       }
+      sRxQueueOccupancy.fetch_sub(1, std::memory_order_relaxed);
       sReadRemainderLen = chunk.len;
       std::memcpy(sReadRemainder, chunk.data, chunk.len);
     }
@@ -183,7 +192,7 @@ bool BulkUsb::try_write(const uint8_t *src, size_t len) {
 BulkUsbStats BulkUsb::takeStats() {
   const BulkUsbStats current{
       sRxBytes, sRxOverflowBytes, sTxBytes, sTxBackpressureDrops, sTxWriteErrors,
-      sRxQueueHighWaterChunks};
+      sRxQueueHighWaterChunks.load(std::memory_order_relaxed)};
   const BulkUsbStats delta{
       current.rxBytes - sLastStats.rxBytes,
       current.rxOverflowBytes - sLastStats.rxOverflowBytes,
