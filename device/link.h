@@ -1,14 +1,12 @@
 #pragma once
 #include <Arduino.h>
 
-// Pose out over Serial (the framed CDC link in frame.h). The CDC itself is
-// owned by the video task (src/display/video_task.cpp), which initializes it
-// on core 0 so its per-byte RX interrupt never runs on the fusion core.
-class UsbLink {
+// Pose out over the framed TinyUSB vendor-bulk pipe. The video task owns bulk
+// receive; UART0 remains the independent console used for boot and calibration.
+class BulkLink {
 public:
-  // Build the 36 B v2 packet (stamp = micros()) and write one FRAME_POSE
-  // frame to Serial. ~250 Hz: alternates send/skip per call, matching the
-  // 500 Hz tick rate.
+  // Build the 36 B v2 packet (stamp = micros()) and write one complete
+  // FRAME_POSE frame to bulk. Alternates send/skip per call at the 500 Hz tick.
   void sendQuat(const float quat[4], const float gyro[3]);
 
   uint32_t sequence() const { return pktSeq_; }

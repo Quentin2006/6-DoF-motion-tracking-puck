@@ -1,9 +1,10 @@
-use std::io::{Read as _, Write};
+use std::io::{self, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::usb_bulk::BulkLink;
 use bevy::camera::{RenderTarget, Viewport};
 use bevy::prelude::*;
 use bevy::render::gpu_readback::{Readback, ReadbackComplete};
@@ -16,7 +17,7 @@ struct LookRig;
 // must match device/packet.h QUAT_PACKET_LEN_V2 (pose payload inside a FRAME_POSE frame)
 const PACKET_LEN: usize = 36;
 
-// Framed CDC contract, mirroring device/frame.h (not a shared crate).
+// Framed vendor-bulk contract, mirroring device/frame.h (not a shared crate).
 const FRAME_MAGIC_0: u8 = 0x55;
 const FRAME_MAGIC_1: u8 = 0xAA;
 const FRAME_POSE: u8 = 0x01;
@@ -27,16 +28,6 @@ const FRAME_MAX_PAYLOAD: usize = 1288; // 8 + VIDEO_FRAG_MAX
 // Transport+render delay extrapolated from packet gyro, and display smoothing.
 const PREDICT_TAU_S: f32 = 0.008;
 const SMOOTH_TAU_S: f32 = 0.006;
-
-// Puck serial link. The S3 board exposes two USB ports: the USB-Serial-JTAG
-// peripheral (Espressif 303a:1001 — the firmware's CDC `Serial`, where the
-// frames are) and the on-board UART bridge (1a86:55d3 — flash/console only).
-// Attach by VID/PID: the ttyACM index depends on plug order, the VID/PID does
-// not. 921600 is the one baud that also works on the bridge; on USB-JTAG it is
-// a no-op — the pipe is capped by the USB delivery path, not the line rate.
-const PUCK_VID: u16 = 0x303a;
-const PUCK_PID: u16 = 0x1001;
-const SERIAL_BAUD: u32 = 921600;
 
 // Video stream to the puck: the stereo pair as one or two baseline JPEGs
 // covering only the rectangles that changed, fragmented into FRAME_VIDEO
@@ -206,7 +197,7 @@ fn build_frame(out: &mut [u8], ty: u8, payload: &[u8]) -> usize {
 // fragments: the device paints the rectangles the table names, and drops a
 // table it cannot paint (a rect past the panel edge, off the MCU grid, or
 // whose lengths do not add up to the blob) rather than guess.
-fn send_rects<W: Write>(writer: &mut W, id: u16, rects: &[Rect], lens: &[usize]) {
+fn send_rects<W: Write>(writer: &mut W, id: u16, rects: &[Rect], lens: &[usize]) -> io::Result<()> {
     let n = rects.len();
     let mut payload = [0u8; 4 + VIDEO_RECT_LEN * VIDEO_RECTS_MAX];
     payload[0..2].copy_from_slice(&id.to_le_bytes());
@@ -221,8 +212,12 @@ fn send_rects<W: Write>(writer: &mut W, id: u16, rects: &[Rect], lens: &[usize])
         payload[o + 9..o + 11].copy_from_slice(&(*len as u16).to_le_bytes());
     }
     let mut frame = [0u8; 7 + 4 + VIDEO_RECT_LEN * VIDEO_RECTS_MAX];
-    let n = build_frame(&mut frame, FRAME_VIDEO_RECT, &payload[..4 + rects.len() * VIDEO_RECT_LEN]);
-    let _ = writer.write_all(&frame[..n]);
+    let n = build_frame(
+        &mut frame,
+        FRAME_VIDEO_RECT,
+        &payload[..4 + rects.len() * VIDEO_RECT_LEN],
+    );
+    writer.write_all(&frame[..n])
 }
 
 // Copy one rectangle out of the readback, RGBA rows packed tight, ready for the
@@ -240,21 +235,18 @@ fn crop_rgba(out: &mut [u8], rgba: &[u8], r: &Rect) {
 // Fragment the blob into FRAME_VIDEO frames and write them, spreading the
 // fragments over the frame interval instead of bursting the whole image.
 //
-// The spread is not cosmetic: the puck's USB-Serial-JTAG RX FIFO is 64 B, so a
-// burst makes its ISR miss packets and the frame arrives shredded (measured:
-// 10.4 kB every 34 ms lost ~30% of its bytes; the same rate paced per fragment
-// lost none). Fragment i leaves at frame_start + i*interval/count, so the first
-// piece of the frame goes out immediately — a rectangle frame is one fragment
-// most of the time, and waiting an interval for it would be a whole frame of
-// latency for nothing — and the last one lands on the grid point the caller
-// paced the frame on.
+// Fragment size and pacing stay unchanged after the transport cutover: the bulk
+// OUT endpoint still has a 64 B FIFO, and decode/SPI—not USB bandwidth—remain
+// the measured panel-rate limit. Fragment i leaves at frame_start +
+// i*interval/count, so the first piece goes out immediately and the last lands
+// on the frame's grid point.
 fn send_blob<W: Write>(
     writer: &mut W,
     id: u16,
     blob: &[u8],
     frame_start: Instant,
     interval: Duration,
-) {
+) -> io::Result<()> {
     let count = blob.len().div_ceil(VIDEO_FRAG_MAX).max(1);
     let per_frag = interval / count as u32;
     let mut payload = [0u8; 8 + VIDEO_FRAG_MAX];
@@ -266,12 +258,13 @@ fn send_blob<W: Write>(
         payload[6..8].copy_from_slice(&(part.len() as u16).to_le_bytes());
         payload[8..8 + part.len()].copy_from_slice(part);
         let n = build_frame(&mut frame, FRAME_VIDEO, &payload[..8 + part.len()]);
-        let _ = writer.write_all(&frame[..n]);
+        writer.write_all(&frame[..n])?;
         let due = frame_start + per_frag * i as u32;
         if let Some(left) = due.checked_duration_since(Instant::now()) {
             thread::sleep(left);
         }
     }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -287,8 +280,8 @@ struct FrameParser {
 
 impl FrameParser {
     // Returns Some((type, len)) exactly once per complete valid frame; the
-    // payload is in `payload_out[..len]`. Bytes that do not form a frame
-    // (log text) are consumed and ignored.
+    // payload is in `payload_out[..len]`. Arbitrary bulk bytes are consumed
+    // and ignored until the next valid frame.
     fn push(&mut self, byte: u8, payload_out: &mut [u8]) -> Option<(u8, usize)> {
         match self.state {
             0 => {
@@ -369,24 +362,21 @@ impl FrameParser {
     }
 }
 
-// Serial pose stream; reader thread owns the port, UI drains to latest.
+// Bulk pose stream; reader thread owns bulk IN, UI drains to latest.
 // crossbeam (not std mpsc): the reader holds a cloned Receiver on the same
 // shared queue so Full means one try_recv discard, then retry — oldest-drop,
 // bounded, never blocks, never grows.
 #[derive(Resource)]
-struct SerialLink {
+struct PuckLink {
     pose_rx: crossbeam_channel::Receiver<Pose>,
 }
 
-// Video sender queue to the puck panel over the same CDC port. The render
-// thread only copies the readback and enqueues; encoding, fragmentation and
-// pacing happen on the sender thread. frame_tx is 2-deep, and a full queue
-// means this readback is *skipped* rather than superseding the queued one:
-// `prev` is the baseline the rectangles are computed against, so it may only
-// ever be a frame the device actually painted. Skipping costs nothing (the next
-// readback simply covers a wider rectangle) while superseding would leave the
-// difference between the two frames on the panels forever — that is a smear on
-// every moving edge, not just a dropped frame.
+// Video sender queue to the puck panels over bulk OUT. The render thread only
+// copies the readback and enqueues; encoding, fragmentation and pacing happen
+// on the sender thread. frame_tx is 2-deep, and a full queue means this
+// readback is skipped rather than superseding the queued baseline. `prev` may
+// only advance to a frame the sender took; superseding instead would leave the
+// difference between queued frames on the panels forever.
 #[derive(Resource)]
 struct VideoTx {
     frame_tx: crossbeam_channel::Sender<Frame>,
@@ -397,7 +387,7 @@ struct VideoTx {
     skipped: Arc<AtomicU32>,
     prev: Box<[u8]>, // last readback *enqueued* (i.e. what the panels will show)
     prev_valid: bool,
-    full_at: Instant,   // when the last whole-canvas repair started
+    full_at: Instant,     // when the last whole-canvas repair started
     keyframe_step: usize, // quadrant cursor of the repair pass in progress
     frame_id: u16,
     // The persistent readback entity and the target it copies. The component is
@@ -453,45 +443,6 @@ fn throttle_readback(
     }
 }
 
-// Native-USB puck port out of the enumerated ports; None if it is unplugged.
-fn pick_puck_port(ports: &[serialport::SerialPortInfo]) -> Option<&str> {
-    ports
-        .iter()
-        .find(|p| {
-            matches!(&p.port_type,
-                serialport::SerialPortType::UsbPort(u) if u.vid == PUCK_VID && u.pid == PUCK_PID)
-        })
-        .map(|p| p.port_name.as_str())
-}
-
-fn open_puck_port() -> Box<dyn serialport::SerialPort> {
-    let name = match std::env::var("PUCK_SERIAL") {
-        Ok(p) => p,
-        Err(_) => {
-            let ports = serialport::available_ports().unwrap_or_default();
-            let found = match pick_puck_port(&ports) {
-                Some(p) => p.to_owned(),
-                None => {
-                    let seen: Vec<String> = ports
-                        .iter()
-                        .map(|p| format!("{} ({:?})", p.port_name, p.port_type))
-                        .collect();
-                    panic!(
-                        "no puck on native USB {PUCK_VID:04x}:{PUCK_PID:04x}; enumerated {seen:?} \
-                         — set PUCK_SERIAL=<port> to override"
-                    );
-                }
-            };
-            found
-        }
-    };
-    println!("puck serial: {name} @ {SERIAL_BAUD}");
-    serialport::new(&name, SERIAL_BAUD)
-        .timeout(Duration::from_millis(50))
-        .open()
-        .unwrap_or_else(|e| panic!("open serial {name} (PUCK_SERIAL={name}): {e:?}"))
-}
-
 #[allow(dead_code)] // stamp asserted by tests; live path keys off seq only
 struct Pose {
     seq: u32,
@@ -517,7 +468,7 @@ fn parse_pose(raw: &[u8]) -> Pose {
 
 fn update(
     camera: Single<&mut Transform, With<LookRig>>,
-    link: Res<SerialLink>,
+    link: Res<PuckLink>,
     mut last_seq: Local<Option<u32>>,
     mut last_applied: Local<Option<Quat>>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -609,7 +560,11 @@ fn setup_scene(
     // override. Rest quat (identity) looks down -Z, which is where the
     // reference object sits.
     commands
-        .spawn((LookRig, Camera3d::default(), Transform::from_xyz(0.0, 1.5, 0.0)))
+        .spawn((
+            LookRig,
+            Camera3d::default(),
+            Transform::from_xyz(0.0, 1.5, 0.0),
+        ))
         .with_children(|rig| {
             for i in 0..2u32 {
                 rig.spawn((
@@ -631,24 +586,35 @@ fn setup_scene(
                 ));
             }
         });
-    // Open the CDC port once: the original handle goes to the pose reader
-    // thread, the clone to the paced video sender thread below.
-    let port = open_puck_port();
-    let writer = port.try_clone().unwrap_or_else(|e| panic!("clone serial port: {e:?}"));
+    // Open and claim the vendor interface once. Arc-backed BulkLink clones let
+    // the pose reader and video writer share that same handle in both directions.
+    let link = BulkLink::open();
+    let writer = link.clone();
     // Pose reader thread: blocking read, frame-parse, parse_pose, oldest-drop
     // send so a stalled UI never blocks the reader and never grows memory
     // (crossbeam receivers share one queue, so a cloned handle discards).
     let (pose_tx, pose_rx) = crossbeam_channel::bounded::<Pose>(512);
     let discard_rx = pose_rx.clone();
     thread::spawn(move || {
-        let mut port = port;
+        let link = link;
         let mut scratch = [0u8; 1024];
         let mut parser = FrameParser::default();
         let mut payload = vec![0u8; FRAME_MAX_PAYLOAD];
         loop {
-            let n = match port.read(&mut scratch) {
+            let n = match link.read_bulk(&mut scratch) {
                 Ok(n) => n,
-                Err(_) => continue,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!("pose stream stopped: {e}");
+                    break;
+                }
             };
             for &b in &scratch[..n] {
                 let Some((ty, len)) = parser.push(b, &mut payload) else {
@@ -665,11 +631,10 @@ fn setup_scene(
             }
         }
     });
-    commands.insert_resource(SerialLink { pose_rx });
-    // JPEG sender thread: owns the cloned serial handle, encodes off the render
-    // thread, fragments, and paces each fragment across the frame interval.
-    // Fire-and-forget; write errors ignored. Returned buffers recycle through
-    // free_tx so the steady state allocates nothing.
+    commands.insert_resource(PuckLink { pose_rx });
+    // JPEG sender thread: owns the shared bulk handle's OUT side, encodes off
+    // the render thread, fragments, and paces each fragment across the frame
+    // interval. Returned buffers recycle through free_tx.
     let (frame_tx, frame_rx) = crossbeam_channel::bounded::<Frame>(2);
     let (free_tx, free_rx) = crossbeam_channel::unbounded::<Box<[u8]>>();
     let return_tx = free_tx.clone();
@@ -698,7 +663,10 @@ fn setup_scene(
         // first write nor lets the rate drift above the target.
         let mut grid = Instant::now();
         let mut log_at = Instant::now();
-        let (mut sent, mut big, mut enc_us, mut enc_n, mut rects_sent) = (0u32, 0u32, 0u64, 0u32, 0u32);
+        let (mut sent, mut big, mut enc_us, mut enc_n, mut rects_sent) =
+            (0u32, 0u32, 0u64, 0u32, 0u32);
+        let mut txerr = 0u64;
+        let mut fatal_error = false;
         loop {
             match frame_rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(frm) => {
@@ -735,18 +703,29 @@ fn setup_scene(
                     if !ok || n != frm.rects_n || out.len() > VIDEO_JPEG_MAX {
                         big += 1;
                     } else {
-                        cached.clear();
-                        cached.extend_from_slice(&out);
-                        cached_rects = frm.rects;
-                        cached_lens = lens;
-                        cached_n = n;
-                        cached_id = frm.id;
-                        send_rects(&mut writer, frm.id, &frm.rects[..n], &lens[..n]);
-
-                        send_blob(&mut writer, frm.id, &out, frame_start, interval);
-                        rects_sent += n as u32;
-                        sent += 1;
-                        last_sent = Instant::now();
+                        let result = send_rects(&mut writer, frm.id, &frm.rects[..n], &lens[..n])
+                            .and_then(|_| {
+                                send_blob(&mut writer, frm.id, &out, frame_start, interval)
+                            });
+                        match result {
+                            Ok(()) => {
+                                cached.clear();
+                                cached.extend_from_slice(&out);
+                                cached_rects = frm.rects;
+                                cached_lens = lens;
+                                cached_n = n;
+                                cached_id = frm.id;
+                                rects_sent += n as u32;
+                                sent += 1;
+                                last_sent = Instant::now();
+                            }
+                            Err(e) if e.kind() == io::ErrorKind::TimedOut => {}
+                            Err(e) => {
+                                txerr += 1;
+                                eprintln!("video stream stopped: {e}");
+                                fatal_error = true;
+                            }
+                        }
                     }
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
@@ -759,23 +738,35 @@ fn setup_scene(
                     {
                         let now = Instant::now();
                         grid = now + interval;
-                        send_rects(&mut writer, cached_id, &cached_rects[..cached_n], &cached_lens[..cached_n]);
-                        send_blob(&mut writer, cached_id, &cached, now, interval);
-                        last_sent = now;
+                        let result = send_rects(
+                            &mut writer,
+                            cached_id,
+                            &cached_rects[..cached_n],
+                            &cached_lens[..cached_n],
+                        )
+                        .and_then(|_| send_blob(&mut writer, cached_id, &cached, now, interval));
+                        match result {
+                            Ok(()) => last_sent = now,
+                            Err(e) if e.kind() == io::ErrorKind::TimedOut => {}
+                            Err(e) => {
+                                txerr += 1;
+                                eprintln!("video stream stopped: {e}");
+                                fatal_error = true;
+                            }
+                        }
                     }
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
             }
-            if log_at.elapsed() >= Duration::from_secs(1) {
+            if log_at.elapsed() >= Duration::from_secs(1) || fatal_error {
                 let enc_ms = if enc_n == 0 {
                     0.0
                 } else {
                     enc_us as f64 / enc_n as f64 / 1000.0
                 };
                 println!(
-                    "video {sent} fps skip {} big {big} enc {enc_ms:.1} ms rects {}",
+                    "video {sent} fps skip {} big {big} enc {enc_ms:.1} ms rects {rects_sent} txerr {txerr}",
                     skipped_tx.load(Ordering::Relaxed),
-                    rects_sent
                 );
                 sent = 0;
                 big = 0;
@@ -783,6 +774,9 @@ fn setup_scene(
                 enc_us = 0;
                 enc_n = 0;
                 log_at = Instant::now();
+                if fatal_error {
+                    break;
+                }
             }
         }
     });
@@ -931,29 +925,6 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn pick_puck_port_prefers_native_usb_over_the_bridge() {
-        let usb = |name: &str, vid: u16, pid: u16| serialport::SerialPortInfo {
-            port_name: name.to_owned(),
-            port_type: serialport::SerialPortType::UsbPort(serialport::UsbPortInfo {
-                vid,
-                pid,
-                serial_number: None,
-                manufacturer: None,
-                product: None,
-            }),
-        };
-        let bridge = usb("/dev/ttyACM1", 0x1a86, 0x55d3);
-        let native = usb("/dev/ttyACM2", PUCK_VID, PUCK_PID);
-        // Enumeration order must not decide the pick.
-        assert_eq!(
-            pick_puck_port(&[bridge.clone(), native.clone()]),
-            Some("/dev/ttyACM2")
-        );
-        assert_eq!(pick_puck_port(&[native, bridge]), Some("/dev/ttyACM2"));
-        assert_eq!(pick_puck_port(&[]), None);
-    }
-
     // The recenter key has no wire bytes to pin, so run the real system and read
     // the rig: without R the rig is the pose; on R it becomes the reference view
     // and stays in that frame afterwards. The last step is what pins the bias to
@@ -972,7 +943,7 @@ mod tests {
         app.init_resource::<ButtonInput<KeyCode>>();
         app.init_resource::<ViewBias>();
         let (tx, rx) = crossbeam_channel::bounded::<Pose>(4);
-        app.insert_resource(SerialLink { pose_rx: rx });
+        app.insert_resource(PuckLink { pose_rx: rx });
         let rig = app.world_mut().spawn((LookRig, Transform::IDENTITY)).id();
         app.add_systems(Update, update);
         // The smoothing slerp needs real time to converge; 50 ms a frame makes
@@ -986,7 +957,11 @@ mod tests {
 
         let turned = Quat::from_rotation_y(0.7);
         step(&mut app, pose(1, turned));
-        assert!(rotation(&app).angle_between(turned) < 2e-3, "{:?}", rotation(&app));
+        assert!(
+            rotation(&app).angle_between(turned) < 2e-3,
+            "{:?}",
+            rotation(&app)
+        );
 
         // R: the orientation the puck is in now becomes the reference view.
         let pressed = Quat::from_rotation_x(-0.4) * turned;
@@ -1113,12 +1088,12 @@ mod tests {
         ];
         let lens = [111usize, 7usize];
         let mut wire = Vec::new();
-        send_rects(&mut wire, 0x1234, &rects, &lens);
+        send_rects(&mut wire, 0x1234, &rects, &lens).unwrap();
         let mut want = vec![
             0x55, 0xAA, 0x05, 0x1A, 0x00, // magic, FRAME_VIDEO_RECT, len = 26
             0x34, 0x12, 0x02, 0x00, // frame, rects = 2
-            0x00, 0x10, 0x00, 0x20, 0x00, 0x30, 0x00, 0x40, 0x00, 0x6F, 0x00,
-            0x01, 0x30, 0x01, 0x00, 0x00, 0x10, 0x00, 0x10, 0x00, 0x07, 0x00,
+            0x00, 0x10, 0x00, 0x20, 0x00, 0x30, 0x00, 0x40, 0x00, 0x6F, 0x00, 0x01, 0x30, 0x01,
+            0x00, 0x00, 0x10, 0x00, 0x10, 0x00, 0x07, 0x00,
         ];
         let mut crc: u16 = 0xFFFF;
         for &b in &wire[2..5 + 4 + 2 * VIDEO_RECT_LEN] {
@@ -1211,7 +1186,10 @@ mod tests {
                 let q = repair_slice(eye, step);
                 assert_eq!(q.eye, eye);
                 assert_eq!((q.x % 16, q.y % 16, q.w % 16, q.h % 16), (0, 0, 0, 0));
-                assert!(q.x + q.w <= 320 && q.y + q.h <= 240, "{q:?} outside the panel");
+                assert!(
+                    q.x + q.w <= 320 && q.y + q.h <= 240,
+                    "{q:?} outside the panel"
+                );
                 area += q.w as usize * q.h as usize;
                 // No overlap with the other quadrants of the same eye.
                 for other in 0..VIDEO_KEYFRAME_STEPS {
@@ -1266,10 +1244,12 @@ mod tests {
     // them back together byte for byte (the device's assembler mirrors this).
     #[test]
     fn send_blob_fragments_and_the_parser_reassembles_them() {
-        let blob: Vec<u8> = (0..VIDEO_FRAG_MAX * 2 + 17).map(|i| (i * 7) as u8).collect();
+        let blob: Vec<u8> = (0..VIDEO_FRAG_MAX * 2 + 17)
+            .map(|i| (i * 7) as u8)
+            .collect();
         let mut wire = Vec::new();
         // Duration::ZERO: nothing to pace against in a test.
-        send_blob(&mut wire, 9, &blob, Instant::now(), Duration::ZERO);
+        send_blob(&mut wire, 9, &blob, Instant::now(), Duration::ZERO).unwrap();
         let mut parser = FrameParser::default();
         let mut out = vec![0u8; FRAME_MAX_PAYLOAD];
         let mut hdrs: Vec<(u16, u16, u16, u16)> = Vec::new();
