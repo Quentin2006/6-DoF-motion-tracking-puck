@@ -79,12 +79,12 @@ static void accept_vendor_rx(uint8_t itf) {
     // operation and the high-water sample and under-report the peak.
     const int32_t occupancy =
         sRxQueueOccupancy.fetch_add(1, std::memory_order_relaxed) + 1;
-    uint16_t peak = sRxQueueHighWaterChunks.load(std::memory_order_relaxed);
-    while (occupancy > peak &&
-           !sRxQueueHighWaterChunks.compare_exchange_weak(
-               peak, static_cast<uint16_t>(occupancy), std::memory_order_relaxed)) {
-    }
     if (xQueueSend(sQueue, &chunk, 0) == pdTRUE) {
+      uint16_t peak = sRxQueueHighWaterChunks.load(std::memory_order_relaxed);
+      while (occupancy > peak &&
+             !sRxQueueHighWaterChunks.compare_exchange_weak(
+                 peak, static_cast<uint16_t>(occupancy), std::memory_order_relaxed)) {
+      }
       sRxBytes += received;
     } else {
       sRxQueueOccupancy.fetch_sub(1, std::memory_order_relaxed);
