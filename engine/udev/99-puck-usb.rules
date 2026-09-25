@@ -1,4 +1,13 @@
-# GROUP is required, not optional: MODE alone leaves the node root:root, and
-# TAG+="uaccess" only works when logind hands the session an ACL. Without a
-# group the node is 0660 root:root and rusb gets EACCES.
-SUBSYSTEM=="usb", ATTR{idVendor}=="303a", ATTR{idProduct}=="1002", GROUP="plugdev", MODE="0660", TAG+="uaccess"
+# The puck is a single-user desktop device, so the node is made world-accessible
+# rather than group-owned.
+#
+# Two earlier attempts failed:
+#   MODE="0660" alone left the node root:root, and rusb got EACCES.
+#   GROUP="plugdev" fixed the node, but only for processes whose supplementary
+#   group list already contained plugdev — i.e. after a re-login. Every shell
+#   started before that still failed, which is a trap worth not shipping.
+#
+# 0666 is the boring option that works from any shell, first try, no re-login.
+# The cost is that any local user could open the device; on a single-user
+# machine that is the same trust boundary as the serial console.
+SUBSYSTEM=="usb", ATTR{idVendor}=="303a", ATTR{idProduct}=="1002", MODE="0666", TAG+="uaccess"
