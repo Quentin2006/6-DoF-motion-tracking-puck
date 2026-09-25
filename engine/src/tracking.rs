@@ -804,10 +804,15 @@ fn spawn_video_sender(
                 } else {
                     enc_us as f64 / enc_n as f64 / 1000.0
                 };
+                // Named args, not positional: with `{}` placeholders the two
+                // counters were filled in the wrong order, so `skip` printed
+                // the error count and `txerr` printed the skip count. The
+                // device counters are the ground truth; this line is how you
+                // decide whether to look at them.
                 println!(
-                    "video {sent} fps skip {} big {big} enc {enc_ms:.1} ms rects {rects_sent} txerr {}",
-                    err.txerr,
-                    skipped_tx.load(Ordering::Relaxed),
+                    "video {sent} fps skip {skipped} big {big} enc {enc_ms:.1} ms rects {rects_sent} txerr {txerr}",
+                    skipped = skipped_tx.load(Ordering::Relaxed),
+                    txerr = err.txerr,
                 );
                 sent = 0;
                 big = 0;
