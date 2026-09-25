@@ -226,10 +226,11 @@ fn crop_rgba(out: &mut [u8], rgba: &[u8], r: &Rect) {
 //
 // Fragment size and pacing stay unchanged after the transport cutover: the bulk
 // OUT endpoint still has a 64 B FIFO, and decode/SPI—not USB bandwidth—remain
-// the measured panel-rate limit. Fragment i leaves at frame_start +
-// i*interval/count, so the first piece goes out immediately and the fragments
-// are spread across the interval; the last lands one sub-interval early, which
-// completes the frame ahead of the next grid point.
+// the measured panel-rate limit. Each iteration writes its fragment and only
+// then sleeps until frame_start + i*interval/count, so fragment i actually
+// leaves the wire one step behind its own index: fragment 0 goes out
+// immediately and the last one at frame_start + (count-2)*interval/count,
+// two sub-intervals before the next grid point.
 fn send_blob<W: Write>(
     writer: &mut W,
     id: u16,

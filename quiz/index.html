@@ -118,7 +118,7 @@ const QUESTIONS = [
     cap: "device/src/display/video.h:34",
     a: ["~91 ms, about 9 fps", "~9 ms, about 100 fps", "~17 ms, about 40 fps", "~45 ms, about 20 fps"],
     ok: 0,
-    why: "Two 240×320 panels is 2×153600 B, which at 3.38 MB/s is 90.8 ms — under 11 fps. That is exactly why nothing in the design ever repaints the whole canvas unless it must." },
+    why: "Two 240×320 panels is 2×153600 B, which at 3.38 MB/s is 90.8 ms. The repo quotes that as 9 fps (device/config.h:91); the arithmetic on those two numbers gives 11 fps, so treat 90.8 ms as the measured figure and 9 fps as the order of magnitude. Either way it is far below the rate the stream targets, which is why nothing repaints the whole canvas unless it must." },
 
   { s: "numbers", q: "Why is the dirty tile 16×16 rather than 8 or 32?",
     code: "// Dirty-rectangle grid. 16x16 is exactly the 4:2:0 MCU, so a rectangle that is\n// 16-px aligned on every side is a whole number of MCUs and a whole number of\n// tiles, and JPEGDEC's block groups (8 MCUs x 1 at this geometry) never\n// straddle a rectangle edge either.",
@@ -173,7 +173,7 @@ const QUESTIONS = [
 
   { s: "rationale", q: "Why does the device hold no full-canvas pixels, and what follows from that?",
     code: "    // room for a shadow (two 320x240 RGB565 shadows are 307 KB against 82 KB\n    // free) and no way to decode less than it is sent. Empty (rects_n == 0)",
-    cap: "engine/src/tracking.rs:89-91",
+    cap: "engine/src/tracking.rs:89-91 (the only-repair clause: device/src/display/video_task.cpp:178-180)",
     a: ["There is no room for a shadow copy (307 KB needed against 82 KB free), so the host's periodic keyframe is the only repair",
         "Because the panel controller cannot be read back, so a local copy would go stale anyway",
         "To save RAM for the JPEG assembly buffer, which is 16 KB",
@@ -183,7 +183,7 @@ const QUESTIONS = [
 
   { s: "rationale", q: "Why is the whole-canvas keyframe rolled over 4 frames instead of sent in one?",
     code: "// It is spread over VIDEO_KEYFRAME_STEPS frames, one slice per eye each:\n// painting a whole canvas is 600 tiles of SPI (~102 ms measured), five times a",
-    cap: "engine/src/tracking.rs:47-49",
+    cap: "engine/src/tracking.rs:47-49 (the 144 ms and 50-57 ms figures: AGENTS.md:139-140)",
     a: ["A whole canvas is 600 tiles of SPI (~102 ms, five times a 40 fps budget) and sent in one frame it made the panel hitch 144 ms every two seconds; rolled, the worst repair frame is 50-57 ms",
         "The device's 16 KB assembly buffer cannot hold a full canvas in one blob",
         "Rolling it guarantees the rectangles stay within VIDEO_RECTS_MAX",
@@ -202,8 +202,8 @@ const QUESTIONS = [
     why: "The deciding cost is the blit, and it was measured both ways. A quadrant halves the tile count per frame but doubles the frames, and the per-frame 58 ms blew the budget — so the design went to thin full-height strips instead." },
 
   { s: "rationale", q: "Why inflate R in the EKF *and* keep a hard gate, instead of one or the other?",
-    code: "  // far reject: coast on gyro\n  if (normDev > EKF_GATE_NORM_FAR) {\n  // ...\n  float ra = EKF_SIGMA_ACCEL * EKF_SIGMA_ACCEL * (1.0f + EKF_GATE_SOFT_K * r * r);\n  // ...\n  // chi2 gate\n  if (maha > EKF_GATE_MAHA) {",
-    cap: "device/src/position/fusion.cpp:120,161,206 (three separate gates)",
+    code: "  // Gate 1: far reject only -> coast on gyro; soft R deweight handles the rest below.\n  if (normDev > EKF_GATE_NORM_FAR) {\n  // ...\n  float ra = EKF_SIGMA_ACCEL * EKF_SIGMA_ACCEL * (1.0f + EKF_GATE_SOFT_K * r * r);\n  // ...\n  // Gate 2: Mahalanobis chi2 3-dof.\n  if (maha > EKF_GATE_MAHA) {",
+    cap: "device/src/position/fusion.cpp:119-120,161,197,206 (elided)",
     a: ["The soft inflation de-weights near-throttle motion smoothly, and the hard gate rejects only the far outliers, so the filter never chatters at a cliff",
         "The inflation is a numerical aid; the gate is the real filter",
         "They are two independent filters left over from an earlier design",
@@ -230,7 +230,7 @@ const QUESTIONS = [
         "The producer is send_rects, not send_jpeg",
         "The comment should say send_mask, which is the real producer"],
     ok: 0,
-    why: "A grep for send_jpeg returns exactly one hit: the comment. The engine's function that fragments the blob is send_blob, and a reader chasing the named symbol finds nothing. The assembler reassembles a blob of one JPEG per rectangle, not a single JPEG." },
+    why: "Before this cleanup a grep for send_jpeg returned exactly one hit in the whole tree: the comment itself. The only hits now are inside this quiz — the excerpt above and two distractor options. The engine's function that fragments the blob is send_blob, so a reader chasing the symbol the comment named found nothing, and the assembler reassembles a blob of one JPEG per rectangle, not a single JPEG." },
 
   { s: "bugs", q: "link.cpp called write_available() and then try_write(), which re-checks the same condition. Was the outer branch a bug?",
     code: "  if (BulkUsb::write_available() < n) {\n    (void)BulkUsb::try_write(frame, n); // account for the non-blocking drop\n    return;\n  }",
@@ -270,7 +270,7 @@ const QUESTIONS = [
         "Yes — the grid is re-anchored after the last fragment",
         "No — fragments are sent as fast as the endpoint accepts them"],
     ok: 0,
-    why: "With count fragments the last one is scheduled at (count-1)/count of the interval, so the frame completes one sub-interval before the next grid point. Harmless in practice, but the comment describes a scheduling behaviour the code does not have." },
+    why: "Each iteration writes its fragment and only then sleeps until frame_start + i*interval/count, so fragment i leaves the wire one step behind its own index: the last fragment goes out at (count-2)/count of the interval, two sub-intervals before the next grid point. Harmless in practice, but the comment described a scheduling behaviour the code did not have." },
 
   { s: "bugs", q: "config.h said \"the host sends a dirty-tile mask\". Does that frame type exist?",
     code: "// its own, which is why the host sends a dirty-tile mask and the video task\n// blits only the tiles it names (src/display/video_task.cpp).",
@@ -405,7 +405,7 @@ function renderTabs() {
     b.setAttribute("role", "tab");
     b.setAttribute("aria-selected", String(s.id === state.section));
     const n = QUESTIONS.filter(q => q.s === s.id).length;
-    const a = QUESTIONS.filter(q => q.s === s.id && state.answers[q.q]).length;
+    const a = QUESTIONS.filter(q => q.s === s.id && state.answers[q.q] !== undefined).length;
     b.textContent = `${s.name} — ${a}/${n}`;
     b.onclick = () => { state.section = s.id; render(); };
     tabs.appendChild(b);
@@ -418,7 +418,7 @@ function renderBar() {
   document.getElementById("breakdown").textContent =
     SECTIONS.map(s => {
       const n = QUESTIONS.filter(q => q.s === s.id).length;
-      const a = QUESTIONS.filter(q => q.s === s.id && state.answers[q.q]).length;
+      const a = QUESTIONS.filter(q => q.s === s.id && state.answers[q.q] !== undefined).length;
       return `${s.name.split("·")[1].trim()} ${a}/${n}`;
     }).join(" · ");
 }

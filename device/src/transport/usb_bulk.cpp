@@ -27,6 +27,10 @@ bool sBegun = false;
 
 uint8_t sReadRemainder[kChunkSize];
 uint8_t sReadRemainderLen = 0;
+// Live queue depth. Nothing outside this file reads it, but the two
+// fetch_sub calls are what make the `occupancy` sample below a *depth* rather
+// than a running total — delete the counter and the high-water, and the `qhi`
+// the console prints, becomes the number of chunks ever accepted.
 std::atomic<int32_t> sRxQueueOccupancy{0};
 std::atomic<uint16_t> sRxQueueHighWaterChunks{0};
 

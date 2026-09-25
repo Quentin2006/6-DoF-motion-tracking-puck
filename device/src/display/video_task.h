@@ -7,7 +7,7 @@ class Display;
 // the sole BulkUsb consumer; UART0 remains independent for console I/O.
 struct VideoStats {
   uint32_t frames; // completed blobs that painted since the last call (one per frame, not per JPEG)
-  uint32_t drops;  // fragments the assembler rejected (a lost or misordered fragment counts once)
+  uint32_t drops;  // fragments the assembler rejected; one lost fragment can count more than once, because a gap also poisons the rest of its frame
   uint32_t bad;    // frames the device refused to paint (rect table or decode)
   uint32_t kb;     // accepted bulk RX bytes since the last call, in KiB
   uint32_t rxDrop; // bulk RX bytes dropped because the chunk queue was full

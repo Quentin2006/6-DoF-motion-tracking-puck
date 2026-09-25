@@ -99,7 +99,7 @@ throughput is raw transport headroom, not a 60-fps panel guarantee.
 |`src/tracking.rs`|`PuckLink`/`VideoTx` resources, `LookRig` stereo cameras, `TrackPlugin`, pose update/recenter, bulk reader, dirty-rectangle JPEG sender, and video logs|
 
 **Cross-file wire contract — generated constants, hand-pinned functions.** The
-21 wire constants (VID/PID, packet and frame types, frame/fragment header and
+20 wire constants (VID/PID, packet and frame types, frame/fragment header and
 CRC lengths, canvas and tile geometry) are **not** written twice. The single
 source is `tools/wire_spec.json`; `tools/gen_wire.py` (Python 3 stdlib only)
 emits `device/wire.h` and `engine/src/wire.rs` from it. Both generated files

@@ -2,10 +2,11 @@
 //
 // The single source is tools/wire_spec.json. Host-compilable on purpose:
 // no Arduino, no Rust, so tests/*.cpp can include it directly.
-// A classic guard, not #pragma once: arduino-cli stages the sketch into
-// build/sketch/, so video.h's "../../wire.h" and config.h's "wire.h"
-// resolve to two copies of this file. A macro guard dedupes across both;
-// #pragma once does not.
+// A macro guard, not #pragma once: two include spellings reach this header
+// in one translation unit — "wire.h" from device/config.h and
+// "../../wire.h" from device/src/display/video.h — and the xtensa
+// toolchain does not dedupe those with #pragma once (20 redefinitions,
+// verified by swapping the guard and rebuilding). A macro guard does.
 #ifndef PUCK_WIRE_H
 #define PUCK_WIRE_H
 
