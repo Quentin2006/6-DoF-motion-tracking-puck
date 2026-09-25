@@ -1,4 +1,5 @@
-.PHONY: all clean lsp compile upload monitor usb-permissions engine device test
+.PHONY: all clean lsp compile upload monitor usb-permissions engine device test \
+	test-contract test-engine gen-wire wire-check quiz-open
 FQBN ?= esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,UploadMode=default
 # CH343 UART bridge for flashing, logs, and calibration. The native USB-OTG
 # connector is owned by the engine's vendor-bulk link and never appears as a
@@ -29,12 +30,21 @@ lsp:
 engine:
 	cd engine && cargo run
 
-# Cross-contract + engine tests. The C++ host test asserts the firmware packet
-# producer (device/packet.h) matches tests/packet_fixture.txt; cargo test asserts
-# the engine parser matches the same bytes. Requires a host g++.
-# tests/video_test.cpp is built with ASAN so "the assembler never writes past
-# its buffer" is a real assertion (redzone), not a code-reading exercise.
-test:
+# Regenerate the cross-half wire constants from tools/wire_spec.json. The two
+# generated files (device/wire.h, engine/src/wire.rs) must never be hand-edited.
+gen-wire:
+	python3 tools/gen_wire.py
+
+# Fail if either generated file has drifted from the spec. Needs python3 only.
+wire-check:
+	python3 tools/gen_wire.py --check
+
+# Cross-contract C++ tests: the firmware packet producer (device/packet.h)
+# against tests/packet_fixture.txt, plus framing and the video contract.
+# Requires a host g++. tests/video_test.cpp is built with ASAN so "the
+# assembler never writes past its buffer" is a real assertion (redzone), not a
+# code-reading exercise.
+test-contract: wire-check
 	mkdir -p build
 	g++ -std=c++17 -Idevice tests/packet_test.cpp -o build/packet_test
 	./build/packet_test tests/packet_fixture.txt
@@ -42,4 +52,11 @@ test:
 	./build/frame_test
 	g++ -std=c++17 -fsanitize=address -Idevice tests/video_test.cpp -o build/video_test
 	./build/video_test
+
+test-engine:
 	cd engine && cargo test
+
+test: test-contract test-engine
+
+quiz-open:
+	xdg-open quiz/index.html
