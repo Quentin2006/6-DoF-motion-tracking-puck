@@ -1,7 +1,5 @@
 #pragma once
-#include "../../config.h"
-#include "mpu6050.h"   // vec3
-#include <math.h>
+#include "mpu6050.h" // vec3
 
 class StillDetector {
 public:

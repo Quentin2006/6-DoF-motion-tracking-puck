@@ -1,6 +1,10 @@
 #include "tracker.h"
+
+#include <Arduino.h> // Serial0, millis, micros, delay
 #include <math.h>
 #include <string.h>
+
+#include "../../config.h"
 
 // "… off x y z scale x y z" — shared by the boot report and the CAL6 solve.
 static void printCal(const char *prefix, const float off[3], const float scale[3]) {
@@ -39,7 +43,7 @@ static void runAccelCal(Mpu6050 &mpu) {
   vec3 means[6];
   for (int p = 0; p < 6; ++p) {
     Serial0.printf("CAL6 pose %s down: hold still, send G\n", kPose[p]);
-    if (!waitForToken("G", 120000UL)) {
+    if (!waitForToken("G", CAL6_TOKEN_TIMEOUT_MS)) {
       Serial0.println("CAL6 aborted, nothing saved");
       return;
     }
@@ -69,7 +73,7 @@ static void runAccelCal(Mpu6050 &mpu) {
   }
   printCal("CAL6 solved", off, scale);
   Serial0.println("CAL6 send SAVE to flash, anything else aborts");
-  if (!waitForToken("SAVE", 120000UL)) {
+  if (!waitForToken("SAVE", CAL6_TOKEN_TIMEOUT_MS)) {
     Serial0.println("CAL6 aborted, nothing saved");
     return;
   }
@@ -114,8 +118,8 @@ bool Tracker::boot() {
   float off[3], scale[3];
   mpu_.getAccelCal(off, scale);
   printCal("accCal", off, scale);
-  Serial0.println("send CAL6 within 5 s for accel cal");
-  maybeRunAccelCal(mpu_, 5000UL);
+  Serial0.printf("send CAL6 within %lu ms for accel cal\n", CAL6_WINDOW_MS);
+  maybeRunAccelCal(mpu_, CAL6_WINDOW_MS);
   vec3 gb;
   mpu_.readGyro(gb); // seed only; first loop() tick is a clean skip anyway
   ekf_.begin(vec3{gb.x * DPS_TO_RPS, gb.y * DPS_TO_RPS, gb.z * DPS_TO_RPS});
@@ -182,8 +186,8 @@ bool Tracker::step() {
   ekf_.getQuat(ex, ey, ez, ew);
   // Display quat: q_disp = QW_ALIGN * q_ekf * QB_ALIGN.
   float tx, ty, tz, tw;
-  quatMul(-0.70710678f, 0.0f, 0.0f, 0.70710678f, ex, ey, ez, ew, tx, ty, tz, tw);
-  quatMul(tx, ty, tz, tw, 0.70710678f, 0.0f, 0.0f, 0.70710678f,
+  quatMul(-DISPLAY_ALIGN_HALF, 0.0f, 0.0f, DISPLAY_ALIGN_HALF, ex, ey, ez, ew, tx, ty, tz, tw);
+  quatMul(tx, ty, tz, tw, DISPLAY_ALIGN_HALF, 0.0f, 0.0f, DISPLAY_ALIGN_HALF,
           quat_[0], quat_[1], quat_[2], quat_[3]);
   gyro_[0] = bg[0] * DPS_TO_RPS;
   gyro_[1] = bg[1] * DPS_TO_RPS;

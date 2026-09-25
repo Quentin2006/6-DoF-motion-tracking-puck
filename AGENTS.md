@@ -4,14 +4,16 @@
 
 A 6-DoF motion-tracking puck. An ESP32-S3 puck reads an MPU6050 IMU, fuses
 accelerometer + gyroscope into a 6-DoF orientation quaternion with a 6-state
-EKF, and streams framed pose packets (~250 Hz) over a native USB TinyUSB
+EKF, and streams framed pose packets (~250 Hz — half `FUSION_RATE_HZ`, because
+`BulkLink::sendQuat` alternates send/skip every tick) over a native USB TinyUSB
 vendor-bulk link to a Rust/Bevy desktop engine. The engine claims that one USB
 interface, parses the frames, drives a **look-around camera rig**, and sends
 the rendered stereo pair back over the same bulk interface. The CH343 COM/UART
 bridge is separate and remains dedicated to flashing, logs, and calibration.
 
-Two independent halves, no shared code, wired together by a single root
-`Makefile` and hand-maintained constant agreement:
+Two independent halves, no shared crate, wired together by a single root
+`Makefile` and one generated wire-constant file per half (see the contract
+section):
 
 - `device/` — ESP32-S3 Arduino firmware (C++ / `.ino` + `.cpp`, `arduino-cli`).
 - `engine/` — Rust **Bevy 0.19.1** desktop visualizer (`cargo run`).
@@ -73,40 +75,52 @@ throughput is raw transport headroom, not a 60-fps panel guarantee.
 | File | Role |
 |---|---|
 | `device.ino` | Orchestrator: `setup()` `videoTaskStart()` (core-0 bulk init) → init/calib → `videoTaskGo()`, `loop()` (tick → send → UART0 report → video counters) |
-| `config.h` | Single source of compile-time constants (pins, FSR, gravity, USB VID/PID, EKF sigmas/gates, axis map, display pins) |
+| `config.h` | Single source of compile-time constants (pins, I2C rate, gravity, EKF sigmas/gates, CAL6 windows, console baud, display pins/timings); the USB VID/PID and every wire size come from the generated `wire.h` |
 | `src/position/tracker.{h,cpp}` | Pipeline glue + `micros()` scheduler + CAL6 accelerometer calibration + 1 Hz status line; owns `Mpu6050`, `Ekf6Dof`, `StillDetector` |
 | `src/position/mpu6050.{h,cpp}` | I2C driver + NVS accel-cal persistence (`Preferences`, namespace `mpu`, keys `ax0-2`/`as0-2`) |
 | `src/position/fusion.{h,cpp}` | `Ekf6Dof` — 6-state EKF (quat w,x,y,z + gyro bias) |
 | `src/position/still_detect.{h,cpp}` | `StillDetector` — gyro re-bias while stationary (50-tick window, variance/norm gates) |
-| `src/transport/usb_bulk.{h,cpp}` | TinyUSB vendor descriptor, 64-byte chunk queue, bulk read/write/flush, and interval transport statistics |
+| `src/transport/usb_bulk.{h,cpp}` | TinyUSB vendor descriptor, 64-byte chunk queue, bulk read/write/flush, and interval RX statistics (bytes, overflow, queue high-water) |
 | `link.{h,cpp}` | `BulkLink` pose producer: complete `FRAME_POSE` writes + sequence counter |
-| `frame.h` | Framed bulk byte-stream contract (magic/type/len/CRC) — host-compilable, parsed by `link.cpp`/`video_task.cpp` and `engine/src/tracking.rs` |
+|`frame.h`|Framed bulk byte-stream contract (magic/type/len/CRC + `frame_crc_feed`/`build_frame`/`FrameParser`) — host-compilable, parsed by `link.cpp`/`video_task.cpp` and `engine/src/tracking.rs`|
 |`src/display/display.{h,cpp}`|Two-panel ST7789 driver: `blitTile(panel, x, y, px)` picks the chip select per tile, one shared SPI transaction per frame, idle RGB cycle on both panels|
 |`src/display/video_task.{h,cpp}`|Core-0 task owning `BulkUsb` receive: rectangle table + blob reassembly, JPEGDEC per rectangle + tile blit, 1 Hz display/transport counters|
-|`src/display/video.h`|Video wire contract: stereo canvas geometry, the dirty-rectangle table + `parse_video_rects_hdr`, the JPEG fragment header + `VideoFragAssembler` — host-compilable, mirrored by `engine/src/tracking.rs`|
+|`src/display/video.h`|Video wire contract: the dirty-rectangle table + `parse_video_rects_hdr`, the blob fragment header + `VideoFragAssembler` (canvas geometry is generated) — host-compilable, mirrored by `engine/src/tracking.rs`|
 | `packet.h` | Canonical 36 B pose payload + `build_quat_packet()` — host-compilable, single source of the byte contract |
+| `wire.h` | **Generated** wire constants for the device half; source is `tools/wire_spec.json`. Do not edit |
 
 **Key modules (`engine/`)**
 
 | File | Role |
 |---|---|
 | `src/main.rs` | Dispatches the optional raw benchmark, then starts the Bevy app |
+|`src/wire.rs`|**Generated** wire constants for the host half; same spec as `device/wire.h`. Do not edit|
 |`src/usb_bulk.rs`|One claimed `rusb` handle behind `Arc`, descriptor endpoint selection, timed bulk I/O, and the 10-second benchmark|
 |`src/tracking.rs`|`PuckLink`/`VideoTx` resources, `LookRig` stereo cameras, `TrackPlugin`, pose update/recenter, bulk reader, dirty-rectangle JPEG sender, and video logs|
 
-**Cross-file wire contract (edit both halves together).** `device/frame.h`,
-`device/packet.h`, `device/src/display/video.h` and `engine/src/tracking.rs`
-hard-code the same framed bulk protocol by hand; there is no shared crate or
-serializer. The 36-byte pose payload (`QUAT_PACKET_LEN_V2`) inside a
-`FRAME_POSE` frame, the `FRAME_VIDEO_MASK` dirty-tile mask, and the 640×240
-baseline-JPEG stereo-pair fragments (`VIDEO_*`), **must match in both halves**.
-Both x86 and ESP32 are little-endian, so no byte-swapping is done.
+**Cross-file wire contract — generated constants, hand-pinned functions.** The
+20 wire constants (VID/PID, packet and frame types, frame/fragment header and
+CRC lengths, canvas and tile geometry) are **not** written twice. The single
+source is `tools/wire_spec.json`; `tools/gen_wire.py` (Python 3 stdlib only)
+emits `device/wire.h` and `engine/src/wire.rs` from it. Both generated files
+carry a `DO NOT EDIT` header. Edit the spec and run `make gen-wire`;
+`make wire-check` re-renders in memory and fails if either file on disk drifted,
+and it runs inside `make test-contract`, so drift fails the PR. Both x86 and
+ESP32 are little-endian, so no byte-swapping is done.
 
-The fragment layout is **canonical in `device/src/display/video.h`**
-(`VideoFragAssembler`, host-compilable, no Arduino deps; the engine's
-`send_jpeg` is the producer). `tests/video_test.cpp` and
-`tracking.rs::video_fragment_wire_layout_is_pinned` assert the same literal
-bytes for one fragment, so a one-sided layout change fails `make test`.
+Four *functions* are still hand-mirrored — `frame_crc_feed`, `build_frame`,
+`FrameParser`, and the rect parser / blob fragmenter — and they are pinned
+byte-for-byte by the tests instead of generated:
+
+- `device/frame.h` (`frame_crc_feed`, `build_frame`, `FrameParser`) and
+  `engine/src/tracking.rs` (the same three) — `tests/frame_test.cpp` covers
+  garbage recovery, CRC rejection, split reassembly, and magic-in-payload, and
+  `tracking.rs::frame_parser_recovers_garbage_prefixed_pose_and_rejects_bad_crc`
+  covers the host half.
+- `device/src/display/video.h` (`parse_video_rects_hdr`, `parse_video_frag_hdr`,
+  `VideoFragAssembler`) and the engine's `send_rects`/`send_blob` — the fragment
+  layout is asserted by `tests/video_test.cpp` and
+  `tracking.rs::video_fragment_wire_layout_is_pinned`.
 
 The rectangle table is canonical there too (`VIDEO_W = 640` split into two
 320-wide eye halves, 16x16 tile grid, up to `VIDEO_RECTS_MAX = 4` rectangles,
@@ -124,25 +138,34 @@ slice per eye each, plus that frame's dirty rectangles: the whole canvas is 600
 tiles of SPI (~102 ms measured, five times a 40 fps frame budget) and sending it
 in one frame made the panel hitch for 144 ms every two seconds. Rolled, the
 worst repair frame measured 50-57 ms instead. The engine's
-`send_mask`/`dirty_mask` are the producer, and
-`tracking.rs::video_mask_wire_layout_is_pinned` + `dirty_mask_covers_exactly_the_changed_tiles`
-assert the same bytes and the same tile-bit mapping as `tests/video_test.cpp`.
+`send_rects`/`dirty_rects` are the producer, and
+`tracking.rs::video_rect_frame_wire_layout_is_pinned` + `dirty_rects_cover_exactly_the_changed_tiles`
+assert the same bytes and the same rectangle bounds as `tests/video_test.cpp`.
 
-The packet byte layout is **canonical in `device/packet.h`**
-(`build_quat_packet`, host-compilable, no Arduino deps); `link.cpp`
-(`BulkLink::sendQuat`) calls it and names `QUAT_PACKET_LEN_V2` directly. The committed `tests/packet_fixture.txt`
-is the single source of truth and is asserted by **both** halves — the C++ host
-test (`tests/packet_test.cpp`, producer) and the Rust parser test
-(`tracking.rs`, consumer). Changing the packet layout means updating
-`device/packet.h`, `tests/packet_fixture.txt`, and the parser — any one-sided
-edit fails `make test`.
+One cross-half inequality is *not* in the spec, because it is a relationship
+and not a value: `VIDEO_HEARTBEAT_MS` (2 s, `engine/src/tracking.rs`) must stay
+below the device's `VIDEO_IDLE_MS` (10 s, `device/config.h`). The heartbeat
+exists only to keep the device out of its idle RGB cycle; if it ever exceeded
+the idle window the panels would repaint over the video.
+
+The packet *byte layout* is **canonical in `device/packet.h`**
+(`build_quat_packet`, host-compilable, no Arduino deps); its length is
+generated. The committed `tests/packet_fixture.txt` is the single source of
+truth for the bytes and is asserted by **both** halves — the C++ host test
+(`tests/packet_test.cpp`, producer) and the Rust parser test
+(`tracking.rs::parse_pose_roundtrips_the_committed_fixture`, consumer).
+Changing the layout means updating `device/packet.h`,
+`tests/packet_fixture.txt`, and the parser — any one-sided edit fails
+`make test`.
 
 ## Key Directories
 
 - `device/` — ESP32-S3 Arduino sketch (source of truth for firmware).
 - `engine/` — Rust Bevy visualizer (`src/main.rs`, `src/tracking.rs`).
-- `tests/` — cross-contract tests: `packet_fixture.txt` (shared golden bytes), `packet_test.cpp` (C++ producer vs fixture), `frame_test.cpp` (framing/CRC/desync), `video_test.cpp` (JPEG fragment + dirty-rectangle contract, ASAN).
-- `.github/` — CI (`workflows/ci.yml`): engine `cargo test` + device `arduino-cli compile`.
+- `tests/` — cross-contract tests: `packet_fixture.txt` (shared golden bytes), `packet_test.cpp` (C++ producer vs fixture), `frame_test.cpp` (framing/CRC/desync), `video_test.cpp` (blob fragment + dirty-rectangle contract, ASAN).
+- `tools/` — `wire_spec.json` (the wire-constant single source) and `gen_wire.py` (emits `device/wire.h` + `engine/src/wire.rs`; `--check` fails on drift). Python 3 stdlib only.
+- `quiz/` — a self-contained comprehension quiz (`index.html`, no build step) over the real code and the measured numbers; `make quiz-open`.
+- `.github/` — CI (`workflows/ci.yml`): three jobs — engine `cargo test`, `contract` (`make test-contract`, the C++ producer half plus `wire-check`), and device `arduino-cli compile`.
 - `build/` — arduino-cli output incl. raw `build/compile_commands.json` (gitignored).
 - Root datasheets `ST7789VW.PDF` (display), `MPU-6000.PDF` (IMU) — reference only.
 - No `docs/`, `scripts/`; all test infra lives in `tests/` + CI.
@@ -163,14 +186,18 @@ make engine            # native USB vendor-bulk Bevy visualizer
 make all               # compile + CH343 upload + bulk engine
 make clean             # arduino-cli compile --clean --fqbn $(FQBN) device
 make lsp               # regenerate + rewrite compile_commands.json for clangd
-make test              # Rust + packet/framing/video host contract tests
+make test              # test-contract + test-engine
+make test-contract     # wire-check + the three C++ host contract tests
+make test-engine       # cargo test
+make gen-wire          # regenerate device/wire.h + engine/src/wire.rs from the spec
+make wire-check        # fail if either generated file drifted from the spec
+make quiz-open         # open quiz/index.html
 ```
 
-- **FQBN** default `esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,UploadMode=default` (in `Makefile` and `device/sketch.yaml`); override with `make compile FQBN=<other>`.
+- `make lsp` = compile with `--only-compilation-database --build-path ./build`, then a `jq` rewrite that maps `build/sketch/` → `device/`, renames `.ino.cpp` → `.ino`, injects `-x c++` on `.ino` files, strips `-MMD`/`-o`/object args, and appends the `--sysroot` derived from arduino-cli's own compiler path. `.clangd` holds no toolchain path, so it works for every contributor.
 - **Native link:** the engine claims exact USB `303a:1002`, auto-detaches any kernel driver, and selects the unique class-`0xff` interface with one bulk IN/OUT pair. `make usb-permissions` installs `engine/udev/99-puck-usb.rules`; replug native USB afterward.
 - **Console/flashing:** `PORT` prefers `/dev/serial/by-id/usb-1a86_USB_Single_Serial_*-if00`, falls back to `/dev/ttyACM0`, and is independent of the native bulk device.
 - `make engine` from repo root, or `cargo run` from `engine/`.
-- `make lsp` = compile with `--only-compilation-database --build-path ./build`, then a `jq` rewrite that maps `build/sketch/` → `device/`, renames `.ino.cpp` → `.ino`, injects `-x c++` on `.ino` files, and strips `-MMD`/`-o`/object args. The `.clangd` compiler/sysroot override handles toolchain include discovery.
 
 ## Code Conventions & Common Patterns
 
@@ -189,10 +216,11 @@ make test              # Rust + packet/framing/video host contract tests
 
 ## Important Files
 
-- `device/config.h` — every compile-time constant and the wire-contract sizes. The file any hardware/fusion change lands in.
+- `device/config.h` — every hardware and filter constant. The file any hardware/fusion change lands in; the rule for what belongs here (vs. class-local) is in its own header comment.
+- `tools/wire_spec.json` + `tools/gen_wire.py` — the wire constants' single source and the generator that emits `device/wire.h` + `engine/src/wire.rs`. Edit the spec, never the generated files.
 - `device/packet.h` — canonical 36 B pose payload + `build_quat_packet()`; the byte contract's single source (host-testable).
-- `device/frame.h` — framed bulk contract (magic/type/len/CRC + `FrameParser`); parsed by `video_task.cpp` and the engine reader.
-- `device/src/display/video.h` — the stereo canvas geometry, the dirty-rectangle table + parser, and the JPEG fragment layout + `VideoFragAssembler`; the video wire contract's single source (host-testable).
+- `device/frame.h` — framed bulk contract (magic/type/len/CRC + `frame_crc_feed`/`build_frame`/`FrameParser`); parsed by `video_task.cpp` and the engine reader.
+- `device/src/display/video.h` — the dirty-rectangle table + parser, and the blob fragment layout + `VideoFragAssembler`; the video wire contract's single source (host-testable).
 - `device/src/transport/usb_bulk.cpp` — TinyUSB interface registration, static chunk queue, host-to-device RX accounting, complete-frame TX, and interval stats.
 - `device/src/display/video_task.cpp` — the only `BulkUsb` reader and the only panel writer: core-0 RX, rectangle table + blob reassembly, per-rectangle JPEG decode, per-tile blit.
 - `device/device.ino` — the boot + loop sequencing (bulk init → UART0 calibration → display ready → stream).
@@ -203,7 +231,6 @@ make test              # Rust + packet/framing/video host contract tests
 ## Runtime / Tooling Preferences
 
 - **Device toolchain:** `arduino-cli` with ESP32 core (had `3.3.11` at `~/.arduino15/packages/esp32/hardware/esp32/`), xtensa toolchain `esp-x32/2601`. Not PlatformIO.
-- **Secrets:** `device/secrets.h` is **gitignored and unused by the firmware** (no includer; transport is USB, no WiFi). If it exists locally, never commit it.
 - **`compile_commands.json` is generated** (`make lsp`); never hand-edit it. Regenerate after changing a sketch source or arduino-cli options — it is what makes clangd handle `.ino` files (via injected `-x c++`).
 - `RFC 2119`-style MUSTs above follow from these facts.
 
@@ -217,11 +244,10 @@ code/document change an agent makes here.
    Use a short `topic` that names the change (the repo uses numbered `cycle-N-...`
    branches for sequenced work, e.g. `cycle6-tests`); keep the branch
    single-purpose.
-2. **Commit** atomic, one logical change per commit. `device/secrets.h` is
-   gitignored — never stage it. Verify before committing:
+2. **Commit** atomic, one logical change per commit. Verify before committing:
    - device change → `make compile`
    - engine change → `cargo build` (or `make engine`)
-   - wire-contract / test change → `make test`
+   - wire-contract / test change → `make test` (`make wire-check` if you touched `tools/wire_spec.json`)
 3. **Push** the branch to `origin` (remote: `git@github.com:Quentin2006/6-DoF-motion-tracking-puck.git`).
 4. **Open a PR** against `main`. Title with a per-area prefix (`Device:`, `Engine:`,
    `Test:`); body states what changed, why, and the exact verification commands +
@@ -229,17 +255,15 @@ code/document change an agent makes here.
    `compile_commands.json`) — they're gitignored anyway.
 5. **Review** the PR — self-review for correctness and against `# Code
    Conventions`, especially anything that touches the cross-file wire contract
-   (`device/packet.h` ↔ `engine/src/tracking.rs`), which must stay in lockstep.
+   (the `tools/wire_spec.json` → `wire.h` / `wire.rs` path, and the hand-mirrored functions the tests pin), which must stay in lockstep.
 6. **Merge** back to `main` once the review is clean and the checks pass. Prefer a
    readable history; merge one PR at a time and keep `main` linear.
 
 Multi-step efforts are split into dependency-ordered PRs (one logical change
 each) and merged sequentially — never batch unrelated changes. The device↔engine
-wire contract is the one thing that can break silently: if either half changes
-the packet format, `make test` is the gate.
-
-**Secrets stay local.** `device/secrets.h` is gitignored and unused (no WiFi
-transport); never commit it if it exists locally.
+wire contract is the one thing that can break silently, and `make test-contract`
+(a CI job) is the gate: it runs the C++ producer half plus the wire-drift check.
+`make test` adds the engine half.
 
 ## Testing & QA
 
@@ -247,34 +271,48 @@ transport); never commit it if it exists locally.
 automated tests guard the cross-half packet contract; functional/IMU
 verification stays manual.
 
-- **`make test`** runs both halves against the same committed fixture:
-  1. **Engine parser test** (`engine/src/tracking.rs`, `#[cfg(test)]`) — decode
-     `tests/packet_fixture.txt` and assert `parse_pose` recovers the logical values
-     (consumer half).
-  2. **C++ producer test** (`tests/packet_test.cpp`, host `g++`) — build a v2
-     packet with `build_quat_packet` and assert the bytes equal the same fixture
-     (producer half). A framing test (`tests/frame_test.cpp`) covers garbage
-     recovery, CRC rejection, split reassembly, and magic-in-payload.
-  3. **Video test** (`tests/video_test.cpp`, host `g++` + ASAN) — the
-     assembler's ordering/loss/cap rules, the pinned wire bytes of one
-     `FRAME_VIDEO` fragment and of one `FRAME_VIDEO_RECT` table, and every bound
-     the rect parser must refuse (unknown eye, off-grid x/y/w/h, a rect past the
-     panel edge, a zero-length JPEG, a truncated table, a blob over the
-     assembly cap). The Rust tests (`video_fragment_wire_layout_is_pinned`,
-     `video_rect_frame_wire_layout_is_pinned`,
-     `dirty_rects_cover_exactly_the_changed_tiles`,
-     `crop_rgba_packs_the_rectangle_rows_tight`) assert the same literals, the
-     same rectangle bounds, and that a crop adds the eye's half of the canvas.
-     ASAN is what makes "never writes past the assembly buffer" — and "never
-     reads past a short payload" — real.
-  Both packet halves read the **same** `tests/packet_fixture.txt`, so a one-sided
-  layout change fails its own test. Needs a host `g++` (not required to flash
-  firmware).
+- **`make test`** = `make test-contract` + `make test-engine`.
+  - **`make test-contract`** (host `g++` + `python3`; no arduino-cli, no ESP32
+    core, no cache, so it runs in seconds) runs `wire-check` first, then:
+    1. **C++ packet producer test** (`tests/packet_test.cpp`) — build a pose
+       packet with `build_quat_packet` and assert the bytes equal
+       `tests/packet_fixture.txt` (producer half).
+    2. **Framing test** (`tests/frame_test.cpp`) — garbage recovery, CRC
+       rejection, split reassembly, and magic-in-payload.
+    3. **Video test** (`tests/video_test.cpp`, + ASAN) — the assembler's
+       ordering/loss/cap rules, the pinned wire bytes of one `FRAME_VIDEO`
+       fragment and of one `FRAME_VIDEO_RECT` table, and every bound the rect
+       parser must refuse (unknown eye, off-grid x/y/w/h, a rect past the panel
+       edge, a zero-length JPEG, a truncated table, a blob over the assembly
+       cap). ASAN is what makes "never writes past the assembly buffer" — and
+       "never reads past a short payload" — real.
+  - **`make test-engine`** = `cd engine && cargo test` — **11 tests**: nine in
+    `engine/src/tracking.rs`
+    (`parse_pose_roundtrips_the_committed_fixture`,
+    `frame_parser_recovers_garbage_prefixed_pose_and_rejects_bad_crc`,
+    `video_fragment_wire_layout_is_pinned`,
+    `video_rect_frame_wire_layout_is_pinned`,
+    `dirty_rects_cover_exactly_the_changed_tiles`,
+    `repair_slices_tile_the_panel`,
+    `crop_rgba_packs_the_rectangle_rows_tight`,
+    `send_blob_fragments_and_the_parser_reassembles_them`,
+    `r_recenters_the_rig_and_poses_afterwards_are_relative_to_it`) and two in
+    `engine/src/usb_bulk.rs`
+    (`benchmark_flag_is_exact_and_ignores_the_program_name`,
+    `endpoint_selection_uses_descriptor_addresses_and_rejects_ambiguity`).
 
-- **CI (`.github/workflows/ci.yml`)** runs `cargo test` on the engine and
-  `arduino-cli compile --fqbn esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,UploadMode=default device` on the
-  firmware (same FQBN as the Makefile; it installs libusb plus the Adafruit display libs
-  and JPEGDEC). No secrets step: the firmware compiles without `device/secrets.h`.
+  Both packet halves read the **same** `tests/packet_fixture.txt`, and the video
+  literals are asserted on both sides, so a one-sided layout change fails its own
+  test. A wrong value in `tools/wire_spec.json` fails `make wire-check`, and
+  through the pinned bytes the contract tests too.
+
+- **CI (`.github/workflows/ci.yml`)** runs three jobs: `engine` (`cargo test`),
+  `contract` (`make test-contract` — the C++ producer half and the wire-drift
+  check; this is what makes the promise above real on a PR), and `device`
+  (`arduino-cli compile --fqbn
+  esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,UploadMode=default device`,
+  same FQBN as the Makefile; it installs libusb plus the Adafruit display libs and
+  JPEGDEC).
 
 **Still manual / no automation:**
 - **Compile gate** locally: `make compile` — keep green after any `device/` change.

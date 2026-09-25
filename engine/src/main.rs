@@ -1,5 +1,6 @@
 mod tracking;
 mod usb_bulk;
+mod wire;
 
 use bevy::prelude::*;
 

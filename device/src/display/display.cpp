@@ -27,17 +27,17 @@ void Display::begin() {
   // the line low first.
   digitalWrite(TFT_RST, HIGH);
   pinMode(TFT_RST, OUTPUT);
-  delay(100);
+  delay(TFT_RESET_SETUP_MS);
   digitalWrite(TFT_RST, LOW);
-  delay(100);
+  delay(TFT_RESET_PULSE_MS);
   digitalWrite(TFT_RST, HIGH);
-  delay(200);
+  delay(TFT_RESET_WAIT_MS);
   // Start the bus once, with the pins the panels are actually wired to: a
   // second init() calls SPI.begin() with all-default pins, and the core
   // returns immediately when the bus is already up (SPIClass::begin exits at
   // the `if (_spi)` check), so panel 1 inherits this bus rather than
   // reconfiguring it.
-  SPI.begin(TFT_SCLK, -1, TFT_MOSI, TFT_CS);
+  SPI.begin(TFT_SCLK, TFT_MISO, TFT_MOSI, TFT_CS);
   for (int i = 0; i < 2; i++) {
     tft_[i].init(TFT_W, TFT_H);
     // The library's own transactions (fillScreen in tick()) must run at the

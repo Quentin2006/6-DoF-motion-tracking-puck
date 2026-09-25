@@ -13,8 +13,14 @@
 namespace {
 
 // Cross-core display counters: the loop core reads, this task writes. A torn
-// 32-bit read at the 1 Hz boundary is harmless — these are rates, not accounting.
+// 32-bit read at the 1 Hz boundary is harmless — these are rates, not
+// accounting — and so is videoTakeStats()'s non-atomic reset: a frame counted
+// between that read and that reset is simply missing from the interval.
 volatile uint32_t gFrames = 0, gDrops = 0, gBad = 0;
+// The KiB conversion in videoTakeStats() is written once here, so the shift
+// and the mask that goes with it cannot drift apart.
+static constexpr uint32_t kKiBShift = 10;
+static constexpr uint32_t kKiBMask = (1UL << kKiBShift) - 1;
 uint32_t gRxByteRemainder = 0;
 
 Display *gDisplay = nullptr;
@@ -201,10 +207,10 @@ VideoStats videoTakeStats() {
   s.bad = gBad;
   const BulkUsbStats bulk = BulkUsb::takeStats();
   const uint32_t rxBytes = gRxByteRemainder + bulk.rxBytes;
-  s.kb = rxBytes >> 10;
+  s.kb = rxBytes >> kKiBShift;
   s.rxDrop = bulk.rxOverflowBytes;
   s.qhi = bulk.rxQueueHighWaterChunks;
   gFrames = gDrops = gBad = 0;
-  gRxByteRemainder = rxBytes & 1023U;
+  gRxByteRemainder = rxBytes & kKiBMask;
   return s;
 }

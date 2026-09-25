@@ -1,7 +1,6 @@
 #pragma once
 
-#include <Arduino.h>
-#include <Wire.h>
+#include <cstdint>
 
 struct vec3 {
   float x = 0;
@@ -15,7 +14,6 @@ public:
 
   bool readGyro(vec3 &out);     // dps, bias-corrected, NO dt scaling
   bool readAccel(vec3 &out);    // m/s², factory-cal + bias-corrected, NO dt scaling
-  bool readRawAccel(vec3 &out); // m/s², all cal bypassed; CAL6-only
   bool meanRawAccel(vec3 &out); // ~200-sample raw mean for one CAL6 pose
 
   bool getGyroBias();  // GYRO_CALIB_SAMPLES-burst mean; false if no sample

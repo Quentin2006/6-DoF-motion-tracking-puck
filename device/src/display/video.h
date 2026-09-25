@@ -1,11 +1,13 @@
 #pragma once
+#include "../../wire.h"
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 
-// Video wire contract: engine -> device, one stereo pair per frame, as one or
-// two baseline JPEGs covering only the changed rectangles, cut into FRAME_VIDEO
-// fragments (device/frame.h) over the vendor-bulk OUT endpoint.
+// Video wire contract: engine -> device, one stereo pair per frame, as one
+// baseline JPEG per dirty rectangle (up to VIDEO_RECTS_MAX), concatenated into
+// one blob and cut into FRAME_VIDEO fragments (device/frame.h) over the
+// vendor-bulk OUT endpoint.
 //
 // Canvas: 640x240, the left eye at x in [0,320) and the right at [320,640) —
 // one panel per half. Painting is per dirty rectangle and in *eye-local*
@@ -21,12 +23,8 @@
 //
 // Panel mounting, including the fact that the two panels are rotated 180 deg
 // from each other, is display hardware: see TFT_ROTATION in config.h.
-constexpr int VIDEO_W = 640;
-constexpr int VIDEO_H = 240;
-constexpr int VIDEO_PANEL_W = 320; // one panel's width, i.e. one eye
-constexpr size_t VIDEO_HDR_LEN = 8;
-constexpr size_t VIDEO_FRAG_MAX = 1280;  // JPEG bytes per fragment; 8 + this = FRAME_MAX_PAYLOAD
-constexpr size_t VIDEO_JPEG_MAX = 16384; // device assembly buffer, and the largest blob accepted
+// The VIDEO_* constants are generated into device/wire.h from
+// tools/wire_spec.json, which is also what the engine reads.
 
 // Dirty-rectangle grid. 16x16 is exactly the 4:2:0 MCU, so a rectangle that is
 // 16-px aligned on every side is a whole number of MCUs and a whole number of
@@ -35,16 +33,13 @@ constexpr size_t VIDEO_JPEG_MAX = 16384; // device assembly buffer, and the larg
 // track the *changed* area instead of the canvas: the SPI blit is what is left
 // (2*153600 B at the measured 3.38 MB/s = 90.8 ms for a full both-panel
 // repaint, which is why nothing repaints all of it unless it must).
-constexpr size_t VIDEO_TILE = 16;
-constexpr size_t VIDEO_RECTS_MAX = 4; // a dirty bbox and a repair quadrant per eye, at most
-constexpr size_t VIDEO_RECT_LEN = 11; // eye u8 | x,y,w,h u16 LE | jpeg_len u16 LE
 
 // One rectangle: which panel, where inside it, and how many bytes of the
 // frame's blob belong to it. Eye-local coordinates, so nothing has to split
 // canvas space twice and a rectangle can never span both panels. Most frames
-// carry one rectangle per eye; a repair frame adds a quadrant per eye, which is
-// how a whole-canvas refresh is spread over KEYFRAME_STEPS frames instead of
-// costing one frame 5x its budget in SPI.
+// carry one rectangle per eye; a repair frame adds a full-height slice per eye,
+// which is how a whole-canvas refresh is spread over VIDEO_KEYFRAME_STEPS
+// frames instead of costing one frame 5x its budget in SPI.
 struct VideoRect {
   uint8_t eye; // 0 = left half / panel 0, 1 = right half / panel 1
   uint16_t x, y, w, h;
@@ -132,7 +127,7 @@ inline bool parse_video_frag_hdr(const uint8_t *pkt, size_t n, VideoFragHdr &hdr
   return true;
 }
 
-// Reassemble one JPEG from its fragments (must mirror send_jpeg in
+// Reassemble the frame's blob from its fragments (must mirror send_blob in
 // engine/src/tracking.rs, which is the producer). Loss poisons a frame: the
 // assembler abandons the rest of it instead of splicing two images together,
 // so the cost of a lost fragment is exactly one frame.

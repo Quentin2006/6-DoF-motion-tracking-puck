@@ -1,4 +1,5 @@
 #pragma once
+#include "wire.h"
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -14,14 +15,9 @@
 // build_quat_packet (device/packet.h); video payloads (FRAME_VIDEO_RECT,
 // FRAME_VIDEO) are the rect table and the 8-byte fragment header from
 // device/src/display/video.h.
-constexpr uint8_t FRAME_MAGIC_0 = 0x55;
-constexpr uint8_t FRAME_MAGIC_1 = 0xAA;
-constexpr uint8_t FRAME_POSE = 0x01;
-constexpr uint8_t FRAME_VIDEO = 0x02; // one JPEG fragment: 8 B header + <= 1280 B
-constexpr uint8_t FRAME_VIDEO_RECT = 0x05; // dirty rectangles for one stereo frame: 4 + 11*rects B
-constexpr size_t FRAME_MAX_PAYLOAD = 1288; // largest payload: 8 + VIDEO_FRAG_MAX
-constexpr size_t FRAME_HDR_LEN = 5;        // magic[2] + type + len[2]
-constexpr size_t FRAME_CRC_LEN = 2;
+// The FRAME_* constants are generated into wire.h from tools/wire_spec.json.
+// Frame types 0x03 and 0x04 are unassigned: a gap in the numbering is
+// deliberate, not an omission.
 
 inline uint16_t frame_crc_feed(uint16_t crc, uint8_t b) {
   crc ^= (uint16_t)b << 8;

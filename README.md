@@ -2,7 +2,8 @@
 
 A self-contained head/puck tracker: an **ESP32-S3** puck reads an **MPU6050**
 IMU, fuses accelerometer + gyroscope into a 6-DoF orientation quaternion with a
-6-state EKF, and streams framed pose packets (~250 Hz) over a native USB
+6-state EKF, and streams framed pose packets (~250 Hz — half `FUSION_RATE_HZ`,
+because `BulkLink::sendQuat` alternates send/skip every tick) over a native USB
 TinyUSB vendor-bulk link to a **Rust/Bevy** desktop engine. The engine drives a
 look-around camera rig. The CH343 COM/UART bridge remains separate for flashing,
 logs, and calibration.
@@ -16,8 +17,11 @@ logs, and calibration.
 ## Requirements
 
 - `arduino-cli` with the ESP32 core (`arduino-cli core install esp32:esp32`).
+- Arduino libraries `Adafruit GFX Library`, `Adafruit ST7735 and ST7789 Library`
+  and `JPEGDEC` (`arduino-cli lib install ...`; the same three CI installs).
 - Rust stable/Cargo and libusb development support (`libusb-1.0-0-dev` on
   Debian/Ubuntu).
+- `jq` (used by `make lsp`) and `python3` (used by `make wire-check`).
 
 ## Build / run
 
@@ -38,6 +42,9 @@ make engine    # run Bevy over native USB vendor bulk
 make device    # compile + CH343 upload + CH343 monitor
 make all       # compile + CH343 upload + bulk engine
 make test      # Rust tests + C++ packet/frame/video contract tests
+make clean     # arduino-cli clean build
+make lsp       # regenerate compile_commands.json for clangd
+make wire-check # fail if the generated wire constants drifted from their spec
 ```
 
 The FQBN is `esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,UploadMode=default`.
@@ -74,6 +81,21 @@ window has keyboard focus.
 
 - **red** — booting / calibrating / not ready
 - **green** — calibrated, streaming pose over USB vendor bulk
+
+## Learn the codebase
+
+24 questions over the real code and the real measured numbers — what the SPI
+throughput is and why it bounds everything, why rectangles instead of full
+JPEGs, the comments that used to describe a protocol that never shipped, and
+the exact byte layout of a frame, a pose payload, and a rectangle table. Every
+answer cites the file and line it came from.
+
+```sh
+make quiz-open   # or just open quiz/index.html
+```
+
+One self-contained file, no build step, no network. Progress is kept in the
+browser's localStorage.
 
 See [AGENTS.md](AGENTS.md) for detailed architecture, conventions, and the
 device↔engine wire contract.

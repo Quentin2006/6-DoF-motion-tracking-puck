@@ -1,9 +1,11 @@
-CompileFlags:
-  Remove: [-m*, -f*]
-  Compiler: /home/qscheetz/.arduino15/packages/esp32/tools/esp-x32/2601/bin/xtensa-esp32s3-elf-g++
-  # Point clang at the xtensa sysroot so include_next finds toolchain
-  # headers instead of host glibc (/usr/include).
-  Add: [--sysroot=/home/qscheetz/.arduino15/packages/esp32/tools/esp-x32/2601/xtensa-esp-elf]
-
+# Editor IntelliSense only — this file does not compile or flash anything.
+#
+# Every toolchain path lives in the repo-root compile_commands.json, which
+# `make lsp` generates from arduino-cli's real command line (it also injects
+# the --sysroot the xtensa headers need). Nothing here hardcodes a path, so
+# this file works for every contributor; run `make lsp` first.
+#
 # NOTE: .ino language is forced via compile_commands.json (-x c++ injected
 # by `make lsp`); no PathMatch block needed here.
+CompileFlags:
+  Remove: [-m*, -f*]

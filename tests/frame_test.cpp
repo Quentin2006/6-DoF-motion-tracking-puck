@@ -42,11 +42,11 @@ int main() {
   // known-good layout (seq=42, stamp=1000, quat identity, gyro 0.5/-0.25/1.5).
   float quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
   float gyro[3] = {0.5f, -0.25f, 1.5f};
-  uint8_t payload[QUAT_PACKET_LEN_V2];
+  uint8_t payload[QUAT_PACKET_LEN];
   build_quat_packet(payload, 42, 1000, quat, gyro);
 
-  uint8_t frame[FRAME_HDR_LEN + QUAT_PACKET_LEN_V2 + FRAME_CRC_LEN];
-  size_t n = build_frame(frame, FRAME_POSE, payload, QUAT_PACKET_LEN_V2);
+  uint8_t frame[FRAME_HDR_LEN + QUAT_PACKET_LEN + FRAME_CRC_LEN];
+  size_t n = build_frame(frame, FRAME_POSE, payload, QUAT_PACKET_LEN);
   CHECK(n == sizeof frame, "frame length");
 
   // 1. Garbage-prefixed valid frame recovers exactly.
@@ -60,9 +60,9 @@ int main() {
     int got = feed(fp, stream.data(), stream.size(), type, out, len);
     CHECK(got == 1, "one frame from garbage-prefixed stream");
     CHECK(type == FRAME_POSE, "pose type");
-    CHECK(len == QUAT_PACKET_LEN_V2, "pose len");
-    CHECK(out.size() == QUAT_PACKET_LEN_V2 &&
-              memcmp(out.data(), payload, QUAT_PACKET_LEN_V2) == 0,
+    CHECK(len == QUAT_PACKET_LEN, "pose len");
+    CHECK(out.size() == QUAT_PACKET_LEN &&
+              memcmp(out.data(), payload, QUAT_PACKET_LEN) == 0,
           "pose payload roundtrip");
   }
 
@@ -112,7 +112,7 @@ int main() {
 
   // 4. Magic bytes inside the payload do not desync the next frame.
   {
-    uint8_t tricky[QUAT_PACKET_LEN_V2];
+    uint8_t tricky[QUAT_PACKET_LEN];
     memset(tricky, 0, sizeof tricky);
     tricky[0] = FRAME_MAGIC_0;
     tricky[1] = FRAME_MAGIC_1;
@@ -128,9 +128,9 @@ int main() {
     std::vector<uint8_t> out;
     int got = feed(fp, stream.data(), stream.size(), type, out, len);
     CHECK(got == 2, "two back-to-back frames with magic in payload");
-    CHECK(type == FRAME_POSE && len == QUAT_PACKET_LEN_V2, "second frame header");
-    CHECK(out.size() == QUAT_PACKET_LEN_V2 &&
-              memcmp(out.data(), payload, QUAT_PACKET_LEN_V2) == 0,
+    CHECK(type == FRAME_POSE && len == QUAT_PACKET_LEN, "second frame header");
+    CHECK(out.size() == QUAT_PACKET_LEN &&
+              memcmp(out.data(), payload, QUAT_PACKET_LEN) == 0,
           "second frame payload");
   }
 

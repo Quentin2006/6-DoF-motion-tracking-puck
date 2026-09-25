@@ -5,6 +5,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::usb_bulk::BulkLink;
+use crate::wire::*;
 use bevy::camera::{RenderTarget, Viewport};
 use bevy::prelude::*;
 use bevy::render::gpu_readback::{Readback, ReadbackComplete};
@@ -14,50 +15,38 @@ use bevy::render::render_resource::{TextureFormat, TextureUsages};
 #[derive(Component)]
 struct LookRig;
 
-// must match device/packet.h QUAT_PACKET_LEN_V2 (pose payload inside a FRAME_POSE frame)
-const PACKET_LEN: usize = 36;
-
-// Framed vendor-bulk contract, mirroring device/frame.h (not a shared crate).
-const FRAME_MAGIC_0: u8 = 0x55;
-const FRAME_MAGIC_1: u8 = 0xAA;
-const FRAME_POSE: u8 = 0x01;
-const FRAME_VIDEO: u8 = 0x02; // one blob fragment: 8 B header + <= 1280 B
-const FRAME_VIDEO_RECT: u8 = 0x05; // the frame's dirty rectangles: 4 + 11*rects B
-const FRAME_MAX_PAYLOAD: usize = 1288; // 8 + VIDEO_FRAG_MAX
+// The wire contract itself (frame types, lengths, canvas geometry) is
+// generated: see crate::wire and tools/wire_spec.json.
 
 // Transport+render delay extrapolated from packet gyro, and display smoothing.
 const PREDICT_TAU_S: f32 = 0.008;
 const SMOOTH_TAU_S: f32 = 0.006;
 
-// Video stream to the puck: the stereo pair as one or two baseline JPEGs
-// covering only the rectangles that changed, fragmented into FRAME_VIDEO
+// Video stream to the puck: the stereo pair as one baseline JPEG per dirty
+// rectangle (up to VIDEO_RECTS_MAX), fragmented into FRAME_VIDEO
 // frames and preceded by a FRAME_VIDEO_RECT frame with the rectangle table.
-// Must match device/src/display/video.h VIDEO_* constants.
+// The VIDEO_* geometry itself is generated (crate::wire).
 //
 // Decoding the whole 640x240 canvas every frame costs the device ~17 ms of
 // JPEGDEC (pixel-bound: measured, and quality does not move it), which capped
 // the panel near 31 fps no matter how little of the frame differed. Sending
 // only the dirty rectangles drops that to ~1 ms for a typical frame, leaving
 // the dirty-area SPI blit as the cost.
-const VIDEO_W: usize = 640;
-const VIDEO_H: usize = 240;
-const VIDEO_PANEL_W: usize = 320; // one panel's half of the canvas, i.e. one eye
-const VIDEO_TILE: usize = 16; // tile grid == the 4:2:0 MCU the device decodes
-const VIDEO_RECTS_MAX: usize = 4; // dirty bbox + repair quadrant, per eye
-const VIDEO_RECT_LEN: usize = 11; // eye u8 | x,y,w,h u16 LE | jpeg_len u16 LE
-const VIDEO_FRAG_MAX: usize = 1280; // JPEG bytes per fragment; 8 + this = FRAME_MAX_PAYLOAD
-const VIDEO_JPEG_MAX: usize = 16384; // device assembly buffer, and the largest blob accepted
 const JPEG_QUALITY: u8 = 75; // the one knob trading fidelity for frame rate
 const VIDEO_TARGET_FPS: u64 = 40;
-const VIDEO_HEARTBEAT_MS: u64 = 2000; // static scene: re-send so the device stays in video mode
+// Static scene: re-send so the device stays in video mode. This is the one
+// cross-half inequality: it must stay below the device's VIDEO_IDLE_MS (10 s in
+// device/config.h), because the heartbeat exists only to keep the device out of
+// its idle RGB cycle, and neither half's own constants would catch a violation.
+const VIDEO_HEARTBEAT_MS: u64 = 2000;
 // Re-send the whole canvas at least this often, changed or not. With rectangles
 // the device holds no full-canvas pixels, so this is the only repair for panels
 // it repainted itself (the idle RGB cycle) and for whatever a lost frame left
 // stale.
 //
-// It is spread over KEYFRAME_STEPS frames, one slice per eye each: painting a
-// whole canvas is 600 tiles of SPI (~102 ms measured), five times a 40 fps
-// frame budget, and doing it in one frame made the panel hitch every two
+// It is spread over VIDEO_KEYFRAME_STEPS frames, one slice per eye each:
+// painting a whole canvas is 600 tiles of SPI (~102 ms measured), five times a
+// 40 fps frame budget, and doing it in one frame made the panel hitch every two
 // seconds. Rolled, each repair frame is one slice more than a normal one.
 const VIDEO_KEYFRAME_MS: u64 = 2000;
 const VIDEO_KEYFRAME_STEPS: usize = 4;
@@ -172,7 +161,7 @@ fn frame_crc_feed(mut crc: u16, b: u8) -> u16 {
 }
 
 // Build one frame (magic + type + len LE + payload + crc LE) into `out`.
-// Caller must size `out` >= 7 + payload.len().
+// Caller must size `out` >= FRAME_HDR_LEN + FRAME_CRC_LEN + payload.len().
 fn build_frame(out: &mut [u8], ty: u8, payload: &[u8]) -> usize {
     let len = payload.len() as u16;
     out[0] = FRAME_MAGIC_0;
@@ -211,7 +200,7 @@ fn send_rects<W: Write>(writer: &mut W, id: u16, rects: &[Rect], lens: &[usize])
         payload[o + 7..o + 9].copy_from_slice(&r.h.to_le_bytes());
         payload[o + 9..o + 11].copy_from_slice(&(*len as u16).to_le_bytes());
     }
-    let mut frame = [0u8; 7 + 4 + VIDEO_RECT_LEN * VIDEO_RECTS_MAX];
+    let mut frame = [0u8; FRAME_HDR_LEN + FRAME_CRC_LEN + 4 + VIDEO_RECT_LEN * VIDEO_RECTS_MAX];
     let n = build_frame(
         &mut frame,
         FRAME_VIDEO_RECT,
@@ -237,9 +226,11 @@ fn crop_rgba(out: &mut [u8], rgba: &[u8], r: &Rect) {
 //
 // Fragment size and pacing stay unchanged after the transport cutover: the bulk
 // OUT endpoint still has a 64 B FIFO, and decode/SPI—not USB bandwidth—remain
-// the measured panel-rate limit. Fragment i leaves at frame_start +
-// i*interval/count, so the first piece goes out immediately and the last lands
-// on the frame's grid point.
+// the measured panel-rate limit. Each iteration writes its fragment and only
+// then sleeps until frame_start + i*interval/count, so fragment i actually
+// leaves the wire one step behind its own index: fragment 0 goes out
+// immediately and the last one at frame_start + (count-2)*interval/count,
+// two sub-intervals before the next grid point.
 fn send_blob<W: Write>(
     writer: &mut W,
     id: u16,
@@ -249,15 +240,15 @@ fn send_blob<W: Write>(
 ) -> io::Result<()> {
     let count = blob.len().div_ceil(VIDEO_FRAG_MAX).max(1);
     let per_frag = interval / count as u32;
-    let mut payload = [0u8; 8 + VIDEO_FRAG_MAX];
-    let mut frame = [0u8; 7 + FRAME_MAX_PAYLOAD];
+    let mut payload = [0u8; VIDEO_HDR_LEN + VIDEO_FRAG_MAX];
+    let mut frame = [0u8; FRAME_HDR_LEN + FRAME_CRC_LEN + FRAME_MAX_PAYLOAD];
     for (i, part) in blob.chunks(VIDEO_FRAG_MAX).enumerate() {
         payload[0..2].copy_from_slice(&id.to_le_bytes());
         payload[2..4].copy_from_slice(&(i as u16).to_le_bytes());
         payload[4..6].copy_from_slice(&(count as u16).to_le_bytes());
         payload[6..8].copy_from_slice(&(part.len() as u16).to_le_bytes());
-        payload[8..8 + part.len()].copy_from_slice(part);
-        let n = build_frame(&mut frame, FRAME_VIDEO, &payload[..8 + part.len()]);
+        payload[VIDEO_HDR_LEN..VIDEO_HDR_LEN + part.len()].copy_from_slice(part);
+        let n = build_frame(&mut frame, FRAME_VIDEO, &payload[..VIDEO_HDR_LEN + part.len()]);
         writer.write_all(&frame[..n])?;
         let due = frame_start + per_frag * i as u32;
         if let Some(left) = due.checked_duration_since(Instant::now()) {
@@ -267,9 +258,51 @@ fn send_blob<W: Write>(
     Ok(())
 }
 
+// Does `r` already cover the whole of `q`? True means the frame paints `q`'s
+// area anyway, so the repair pass does not need to add it as its own rect.
+fn covers(r: &Rect, q: &Rect) -> bool {
+    r.eye == q.eye
+        && r.x <= q.x
+        && r.y <= q.y
+        && r.x + r.w >= q.x + q.w
+        && r.y + r.h >= q.y + q.h
+}
+
+// Take a canvas buffer from the pool. An empty pool means the sender has not
+// returned one yet, so allocate a fresh canvas rather than block the render
+// thread.
+fn take_buffer(free_rx: &crossbeam_channel::Receiver<Box<[u8]>>) -> Box<[u8]> {
+    free_rx
+        .try_recv()
+        .unwrap_or_else(|_| vec![0u8; VIDEO_W * 4 * VIDEO_H].into_boxed_slice())
+}
+
+// The sender's two pieces of error state, grouped so a send takes one borrow
+// instead of two out-parameters.
+#[derive(Default)]
+struct TxError {
+    txerr: u64,
+    fatal: bool,
+}
+
+// The eight parser states, mirroring device/frame.h's FrameParser::State, so a
+// reader can see the whole machine instead of counting match arms.
+#[derive(Clone, Copy, Default, PartialEq)]
+enum State {
+    #[default]
+    Hunt,
+    GotMagic0,
+    Ty,
+    LenLo,
+    LenHi,
+    Payload,
+    CrcLo,
+    CrcHi,
+}
+
 #[derive(Default)]
 struct FrameParser {
-    state: u8, // 0 hunt, 1 got-magic0, 2 type, 3 len-lo, 4 len-hi, 5 payload, 6 crc-lo, 7 crc-hi
+    state: State,
     ty: u8,
     len: usize,
     pos: usize,
@@ -284,35 +317,35 @@ impl FrameParser {
     // and ignored until the next valid frame.
     fn push(&mut self, byte: u8, payload_out: &mut [u8]) -> Option<(u8, usize)> {
         match self.state {
-            0 => {
+            State::Hunt => {
                 if byte == FRAME_MAGIC_0 {
-                    self.state = 1;
+                    self.state = State::GotMagic0;
                 }
                 None
             }
-            1 => {
+            State::GotMagic0 => {
                 if byte == FRAME_MAGIC_1 {
-                    self.state = 2;
+                    self.state = State::Ty;
                 } else if byte == FRAME_MAGIC_0 {
-                    self.state = 1; // overlap: 0x55 0x55 0xAA
+                    self.state = State::GotMagic0; // overlap: 0x55 0x55 0xAA
                 } else {
-                    self.state = 0;
+                    self.state = State::Hunt;
                 }
                 None
             }
-            2 => {
+            State::Ty => {
                 self.ty = byte;
                 self.crc = frame_crc_feed(0xFFFF, byte);
-                self.state = 3;
+                self.state = State::LenLo;
                 None
             }
-            3 => {
+            State::LenLo => {
                 self.len = byte as usize;
                 self.crc = frame_crc_feed(self.crc, byte);
-                self.state = 4;
+                self.state = State::LenHi;
                 None
             }
-            4 => {
+            State::LenHi => {
                 self.len |= (byte as usize) << 8;
                 self.crc = frame_crc_feed(self.crc, byte);
                 if self.len > FRAME_MAX_PAYLOAD {
@@ -323,24 +356,24 @@ impl FrameParser {
                 if self.buf.len() < self.len {
                     self.buf.resize(self.len, 0);
                 }
-                self.state = if self.len == 0 { 6 } else { 5 };
+                self.state = if self.len == 0 { State::CrcLo } else { State::Payload };
                 None
             }
-            5 => {
+            State::Payload => {
                 self.buf[self.pos] = byte;
                 self.pos += 1;
                 self.crc = frame_crc_feed(self.crc, byte);
                 if self.pos >= self.len {
-                    self.state = 6;
+                    self.state = State::CrcLo;
                 }
                 None
             }
-            6 => {
+            State::CrcLo => {
                 self.crc_rx = byte as u16;
-                self.state = 7;
+                self.state = State::CrcHi;
                 None
             }
-            _ => {
+            State::CrcHi => {
                 let rx = self.crc_rx | ((byte as u16) << 8);
                 let (ty, len, ok) = (self.ty, self.len, rx == self.crc);
                 if ok {
@@ -353,7 +386,7 @@ impl FrameParser {
     }
 
     fn reset(&mut self) {
-        self.state = 0;
+        self.state = State::Hunt;
         self.ty = 0;
         self.len = 0;
         self.pos = 0;
@@ -388,7 +421,7 @@ struct VideoTx {
     prev: Box<[u8]>, // last readback *enqueued* (i.e. what the panels will show)
     prev_valid: bool,
     full_at: Instant,     // when the last whole-canvas repair started
-    keyframe_step: usize, // quadrant cursor of the repair pass in progress
+    keyframe_step: usize, // slice cursor of the repair pass in progress
     frame_id: u16,
     // The persistent readback entity and the target it copies. The component is
     // attached only while the sender can take a frame: a readback is a
@@ -443,9 +476,9 @@ fn throttle_readback(
     }
 }
 
-#[allow(dead_code)] // stamp asserted by tests; live path keys off seq only
 struct Pose {
     seq: u32,
+    #[allow(dead_code)] // asserted by the fixture test; the live path keys off seq only
     stamp: u32,
     q: Quat,
     gyro: Vec3,
@@ -527,22 +560,24 @@ fn update(
     *last_applied = Some(q_out);
 }
 
-fn setup_scene(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut images: ResMut<Assets<Image>>,
+// Static reference object plus the one light: everything the rig's motion is
+// judged against, and nothing that belongs to the rig itself.
+fn spawn_rig_scene(
+    commands: &mut Commands,
+    meshes: &mut ResMut<Assets<Mesh>>,
+    materials: &mut ResMut<Assets<StandardMaterial>>,
 ) {
-    // Static reference object so the camera rig's motion is visible.
     commands.spawn((
         Mesh3d(meshes.add(Cuboid::new(2.9 / 2., 0.1 / 2., 5.7 / 2.))),
         MeshMaterial3d(materials.add(Color::srgb(0.3, 0.5, 0.8))),
         Transform::from_xyz(0.0, 0.5, -6.0),
     ));
     commands.spawn((PointLight::default(), Transform::from_xyz(4.0, 8.0, 4.0)));
+}
 
-    // Off-screen 640x240 RGBA8 target holding the stereo pair: COPY_SRC added
-    // for the readback copy (missing from new_target_texture's default usage).
+// Off-screen 640x240 RGBA8 target holding the stereo pair: COPY_SRC added
+// for the readback copy (missing from new_target_texture's default usage).
+fn create_video_target(images: &mut ResMut<Assets<Image>>) -> Handle<Image> {
     let mut target = Image::new_target_texture(
         VIDEO_W as u32,
         VIDEO_H as u32,
@@ -550,15 +585,17 @@ fn setup_scene(
         Some(TextureFormat::Rgba8UnormSrgb),
     );
     target.texture_descriptor.usage |= TextureUsages::COPY_SRC;
-    let target = images.add(target);
+    images.add(target)
+}
 
-    // The puck drives this rig; the two eye cameras ride along as children, so
-    // Bevy's transform propagation keeps them on the rig and IPD_M apart from
-    // each other. Their viewports are the two halves of the target (order
-    // -2/-1 render before the window camera), and each eye's projection is
-    // built from its own 320x240 viewport — so both are 4:3 without an aspect
-    // override. Rest quat (identity) looks down -Z, which is where the
-    // reference object sits.
+// The puck drives this rig; the two eye cameras ride along as children, so
+// Bevy's transform propagation keeps them on the rig and IPD_M apart from
+// each other. Their viewports are the two halves of the target (order
+// -2/-1 render before the window camera), and each eye's projection is
+// built from its own 320x240 viewport — so both are 4:3 without an aspect
+// override. Rest quat (identity) looks down -Z, which is where the
+// reference object sits.
+fn spawn_look_rig(commands: &mut Commands, target: &Handle<Image>) {
     commands
         .spawn((
             LookRig,
@@ -567,6 +604,9 @@ fn setup_scene(
         ))
         .with_children(|rig| {
             for i in 0..2u32 {
+                // Eye 0 is the left half of the canvas at -IPD_M/2, eye 1 the
+                // right at +IPD_M/2 (Bevy's +X is right when looking down -Z).
+                let offset = (i as f32 - 0.5) * IPD_M;
                 rig.spawn((
                     Camera3d::default(),
                     Camera {
@@ -579,66 +619,64 @@ fn setup_scene(
                         ..default()
                     },
                     RenderTarget::Image(target.clone().into()),
-                    // Eye 0 is the left half of the canvas at -IPD_M/2, eye 1
-                    // the right at +IPD_M/2 (Bevy's +X is right when looking
-                    // down -Z).
-                    Transform::from_xyz((i as f32 - 0.5) * IPD_M, 0.0, 0.0),
+                    Transform::from_xyz(offset, 0.0, 0.0),
                 ));
             }
         });
-    // Open and claim the vendor interface once. Arc-backed BulkLink clones let
-    // the pose reader and video writer share that same handle in both directions.
-    let link = BulkLink::open();
-    let writer = link.clone();
-    // Pose reader thread: blocking read, frame-parse, parse_pose, oldest-drop
-    // send so a stalled UI never blocks the reader and never grows memory
-    // (crossbeam receivers share one queue, so a cloned handle discards).
-    let (pose_tx, pose_rx) = crossbeam_channel::bounded::<Pose>(512);
-    let discard_rx = pose_rx.clone();
-    thread::spawn(move || {
-        let link = link;
-        let mut scratch = [0u8; 1024];
-        let mut parser = FrameParser::default();
-        let mut payload = vec![0u8; FRAME_MAX_PAYLOAD];
-        loop {
-            let n = match link.read_bulk(&mut scratch) {
-                Ok(n) => n,
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
-                    ) =>
-                {
-                    continue;
-                }
-                Err(e) => {
-                    eprintln!("pose stream stopped: {e}");
-                    break;
-                }
-            };
-            for &b in &scratch[..n] {
-                let Some((ty, len)) = parser.push(b, &mut payload) else {
-                    continue;
-                };
-                if ty != FRAME_POSE || len != PACKET_LEN {
-                    continue;
-                }
-                let pose = parse_pose(&payload[..len]);
-                if let Err(crossbeam_channel::TrySendError::Full(pose)) = pose_tx.try_send(pose) {
-                    let _ = discard_rx.try_recv();
-                    let _ = pose_tx.try_send(pose);
-                }
-            }
+}
+
+// What one rect-table + blob transmit did. A timeout is the device being
+// briefly unready and is not an error; anything else ends the stream, and the
+// message is what the operator sees, so it is printed here, once.
+enum SendOutcome {
+    Ok,
+    TimedOut,
+    Fatal,
+}
+
+// What one transmit sends: the frame's identity, its rectangle table with the
+// matching JPEG lengths, and the blob those lengths slice up. Grouped so
+// transmit() takes the payload as one value.
+struct Send<'a> {
+    id: u16,
+    rects: &'a [Rect],
+    lens: &'a [usize],
+    blob: &'a [u8],
+}
+
+// The one send path both call sites share: the rect table first (the device
+// paints what the table names), then the paced blob fragments.
+fn transmit(
+    writer: &mut BulkLink,
+    send: &Send<'_>,
+    frame_start: Instant,
+    interval: Duration,
+    err: &mut TxError,
+) -> SendOutcome {
+    let result = send_rects(writer, send.id, send.rects, send.lens)
+        .and_then(|_| send_blob(writer, send.id, send.blob, frame_start, interval));
+    match result {
+        Ok(()) => SendOutcome::Ok,
+        Err(e) if e.kind() == io::ErrorKind::TimedOut => SendOutcome::TimedOut,
+        Err(e) => {
+            err.txerr += 1;
+            eprintln!("video stream stopped: {e}");
+            err.fatal = true;
+            SendOutcome::Fatal
         }
-    });
-    commands.insert_resource(PuckLink { pose_rx });
-    // JPEG sender thread: owns the shared bulk handle's OUT side, encodes off
-    // the render thread, fragments, and paces each fragment across the frame
-    // interval. Returned buffers recycle through free_tx.
-    let (frame_tx, frame_rx) = crossbeam_channel::bounded::<Frame>(2);
-    let (free_tx, free_rx) = crossbeam_channel::unbounded::<Box<[u8]>>();
+    }
+}
+
+// JPEG sender thread: owns the shared bulk handle's OUT side, encodes off
+// the render thread, fragments, and paces each fragment across the frame
+// interval. Returned buffers recycle through free_tx.
+fn spawn_video_sender(
+    writer: BulkLink,
+    frame_rx: crossbeam_channel::Receiver<Frame>,
+    free_tx: crossbeam_channel::Sender<Box<[u8]>>,
+    skipped: Arc<AtomicU32>,
+) {
     let return_tx = free_tx.clone();
-    let skipped = Arc::new(AtomicU32::new(0));
     let skipped_tx = skipped.clone();
     thread::spawn(move || {
         let mut writer = writer;
@@ -665,8 +703,7 @@ fn setup_scene(
         let mut log_at = Instant::now();
         let (mut sent, mut big, mut enc_us, mut enc_n, mut rects_sent) =
             (0u32, 0u32, 0u64, 0u32, 0u32);
-        let mut txerr = 0u64;
-        let mut fatal_error = false;
+        let mut err = TxError::default();
         loop {
             match frame_rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(frm) => {
@@ -703,12 +740,19 @@ fn setup_scene(
                     if !ok || n != frm.rects_n || out.len() > VIDEO_JPEG_MAX {
                         big += 1;
                     } else {
-                        let result = send_rects(&mut writer, frm.id, &frm.rects[..n], &lens[..n])
-                            .and_then(|_| {
-                                send_blob(&mut writer, frm.id, &out, frame_start, interval)
-                            });
-                        match result {
-                            Ok(()) => {
+                        match transmit(
+                            &mut writer,
+                            &Send {
+                                id: frm.id,
+                                rects: &frm.rects[..n],
+                                lens: &lens[..n],
+                                blob: &out,
+                            },
+                            frame_start,
+                            interval,
+                            &mut err,
+                        ) {
+                            SendOutcome::Ok => {
                                 cached.clear();
                                 cached.extend_from_slice(&out);
                                 cached_rects = frm.rects;
@@ -719,12 +763,8 @@ fn setup_scene(
                                 sent += 1;
                                 last_sent = Instant::now();
                             }
-                            Err(e) if e.kind() == io::ErrorKind::TimedOut => {}
-                            Err(e) => {
-                                txerr += 1;
-                                eprintln!("video stream stopped: {e}");
-                                fatal_error = true;
-                            }
+                            SendOutcome::TimedOut => {}
+                            SendOutcome::Fatal => {}
                         }
                     }
                 }
@@ -738,35 +778,41 @@ fn setup_scene(
                     {
                         let now = Instant::now();
                         grid = now + interval;
-                        let result = send_rects(
+                        match transmit(
                             &mut writer,
-                            cached_id,
-                            &cached_rects[..cached_n],
-                            &cached_lens[..cached_n],
-                        )
-                        .and_then(|_| send_blob(&mut writer, cached_id, &cached, now, interval));
-                        match result {
-                            Ok(()) => last_sent = now,
-                            Err(e) if e.kind() == io::ErrorKind::TimedOut => {}
-                            Err(e) => {
-                                txerr += 1;
-                                eprintln!("video stream stopped: {e}");
-                                fatal_error = true;
-                            }
+                            &Send {
+                                id: cached_id,
+                                rects: &cached_rects[..cached_n],
+                                lens: &cached_lens[..cached_n],
+                                blob: &cached,
+                            },
+                            now,
+                            interval,
+                            &mut err,
+                        ) {
+                            SendOutcome::Ok => last_sent = now,
+                            SendOutcome::TimedOut => {}
+                            SendOutcome::Fatal => {}
                         }
                     }
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
             }
-            if log_at.elapsed() >= Duration::from_secs(1) || fatal_error {
+            if log_at.elapsed() >= Duration::from_secs(1) || err.fatal {
                 let enc_ms = if enc_n == 0 {
                     0.0
                 } else {
                     enc_us as f64 / enc_n as f64 / 1000.0
                 };
+                // Named args, not positional: with `{}` placeholders the two
+                // counters were filled in the wrong order, so `skip` printed
+                // the error count and `txerr` printed the skip count. The
+                // device counters are the ground truth; this line is how you
+                // decide whether to look at them.
                 println!(
-                    "video {sent} fps skip {} big {big} enc {enc_ms:.1} ms rects {rects_sent} txerr {txerr}",
-                    skipped_tx.load(Ordering::Relaxed),
+                    "video {sent} fps skip {skipped} big {big} enc {enc_ms:.1} ms rects {rects_sent} txerr {txerr}",
+                    skipped = skipped_tx.load(Ordering::Relaxed),
+                    txerr = err.txerr,
                 );
                 sent = 0;
                 big = 0;
@@ -774,12 +820,76 @@ fn setup_scene(
                 enc_us = 0;
                 enc_n = 0;
                 log_at = Instant::now();
-                if fatal_error {
+                if err.fatal {
                     break;
                 }
             }
         }
     });
+}
+
+// Composition only: spawn what the scene needs, open the link, start the two
+// threads, and insert the resources the Update systems read.
+fn setup_scene(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    spawn_rig_scene(&mut commands, &mut meshes, &mut materials);
+    let target = create_video_target(&mut images);
+    spawn_look_rig(&mut commands, &target);
+
+    // Open and claim the vendor interface once. Arc-backed BulkLink clones let
+    // the pose reader and video writer share that same handle in both directions.
+    let link = BulkLink::open();
+    let writer = link.clone();
+    // Pose reader thread: blocking read, frame-parse, parse_pose, oldest-drop
+    // send so a stalled UI never blocks the reader and never grows memory
+    // (crossbeam receivers share one queue, so a cloned handle discards).
+    let (pose_tx, pose_rx) = crossbeam_channel::bounded::<Pose>(512);
+    let discard_rx = pose_rx.clone();
+    thread::spawn(move || {
+        let link = link;
+        let mut scratch = [0u8; 1024];
+        let mut parser = FrameParser::default();
+        let mut payload = vec![0u8; FRAME_MAX_PAYLOAD];
+        loop {
+            let n = match link.read_bulk(&mut scratch) {
+                Ok(n) => n,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!("pose stream stopped: {e}");
+                    break;
+                }
+            };
+            for &b in &scratch[..n] {
+                let Some((ty, len)) = parser.push(b, &mut payload) else {
+                    continue;
+                };
+                if ty != FRAME_POSE || len != QUAT_PACKET_LEN {
+                    continue;
+                }
+                let pose = parse_pose(&payload[..len]);
+                if let Err(crossbeam_channel::TrySendError::Full(pose)) = pose_tx.try_send(pose) {
+                    let _ = discard_rx.try_recv();
+                    let _ = pose_tx.try_send(pose);
+                }
+            }
+        }
+    });
+    commands.insert_resource(PuckLink { pose_rx });
+    let (frame_tx, frame_rx) = crossbeam_channel::bounded::<Frame>(2);
+    let (free_tx, free_rx) = crossbeam_channel::unbounded::<Box<[u8]>>();
+    let skipped = Arc::new(AtomicU32::new(0));
+    spawn_video_sender(writer, frame_rx, free_tx.clone(), skipped.clone());
 
     // One persistent readback entity, with its `Readback` component attached and
     // detached by throttle_readback() as the sender allows. Spawn once and never
@@ -816,14 +926,17 @@ fn on_video_readback(readback: On<ReadbackComplete>, mut video: ResMut<VideoTx>)
     // The sender is the pacer. A readback it cannot take right away is not
     // consumed at all: leaving `prev` alone means the next one is compared
     // against the frame the device painted, so the difference widens into that
-    // next frame's rectangles instead of being lost.
+    // next frame's rectangles instead of being lost. Not the same check as
+    // throttle_readback's on the same condition — that one keeps the GPU from
+    // starting a copy; this one refuses a copy that already landed, and counts
+    // it.
     if video.frame_tx.is_full() {
         video.skipped.fetch_add(1, Ordering::Relaxed);
         return;
     }
     let src = &data[..VIDEO_W * 4 * VIDEO_H];
-    // A repair pass walks the canvas a quadrant at a time; a frame that is not
-    // part of one carries only what changed.
+    // A repair pass walks the canvas a full-height slice at a time; a frame that
+    // is not part of one carries only what changed.
     let starting = video.full_at.elapsed() >= Duration::from_millis(VIDEO_KEYFRAME_MS);
     if starting {
         video.keyframe_step = 0;
@@ -842,27 +955,18 @@ fn on_video_readback(readback: On<ReadbackComplete>, mut video: ResMut<VideoTx>)
     };
     let repair_step = video.keyframe_step;
     if repairing && video.prev_valid {
-        // This pass's quadrant, per eye — unless the dirty box already covers
+        // This pass's slice, per eye — unless the dirty box already covers
         // it, in which case the frame is painting that area anyway.
         for eye in 0..2u8 {
             let q = repair_slice(eye, repair_step);
-            let covered = rects[..rects_n].iter().any(|r| {
-                r.eye == eye
-                    && r.x <= q.x
-                    && r.y <= q.y
-                    && r.x + r.w >= q.x + q.w
-                    && r.y + r.h >= q.y + q.h
-            });
+            let covered = rects[..rects_n].iter().any(|r| covers(r, &q));
             if !covered && rects_n < VIDEO_RECTS_MAX {
                 rects[rects_n] = q;
                 rects_n += 1;
             }
         }
     }
-    let mut buf = video
-        .free_rx
-        .try_recv()
-        .unwrap_or_else(|_| vec![0u8; VIDEO_W * 4 * VIDEO_H].into_boxed_slice());
+    let mut buf = take_buffer(&video.free_rx);
     buf.copy_from_slice(src);
     if rects_n == 0 {
         let _ = video.free_tx.send(buf); // nothing changed, and no keyframe due
@@ -994,7 +1098,7 @@ mod tests {
     #[test]
     fn parse_pose_roundtrips_the_committed_fixture() {
         let bytes = fixture_bytes();
-        assert_eq!(bytes.len(), PACKET_LEN);
+        assert_eq!(bytes.len(), QUAT_PACKET_LEN);
         let p = parse_pose(&bytes);
         assert_eq!((p.seq, p.stamp), (42, 1000));
         assert_eq!(p.q, Quat::from_xyzw(0.0, 0.0, 0.0, 1.0));
@@ -1004,8 +1108,8 @@ mod tests {
     #[test]
     fn frame_parser_recovers_garbage_prefixed_pose_and_rejects_bad_crc() {
         let payload = fixture_bytes();
-        assert_eq!(payload.len(), PACKET_LEN);
-        let mut frame = vec![0u8; 7 + PACKET_LEN];
+        assert_eq!(payload.len(), QUAT_PACKET_LEN);
+        let mut frame = vec![0u8; FRAME_HDR_LEN + FRAME_CRC_LEN + QUAT_PACKET_LEN];
         let n = build_frame(&mut frame, FRAME_POSE, &payload);
         assert_eq!(n, frame.len());
         // Garbage-prefixed valid frame recovers exactly.
@@ -1018,7 +1122,7 @@ mod tests {
             }
         }
         let (ty, len) = got.expect("valid frame must parse");
-        assert_eq!((ty, len), (FRAME_POSE, PACKET_LEN));
+        assert_eq!((ty, len), (FRAME_POSE, QUAT_PACKET_LEN));
         assert_eq!(&out[..len], &payload[..]);
         // One flipped payload byte: parser must yield nothing.
         let mut bad = frame.clone();
@@ -1044,7 +1148,7 @@ mod tests {
         payload.extend_from_slice(&2u16.to_le_bytes()); // count
         payload.extend_from_slice(&3u16.to_le_bytes()); // len
         payload.extend_from_slice(&[0xAA, 0xBB, 0xCC]);
-        let mut frame = vec![0u8; 7 + payload.len()];
+        let mut frame = vec![0u8; FRAME_HDR_LEN + FRAME_CRC_LEN + payload.len()];
         let n = build_frame(&mut frame, FRAME_VIDEO, &payload);
         let mut want = vec![
             0x55, 0xAA, 0x02, 0x0B, 0x00, // magic, FRAME_VIDEO, len = 11
@@ -1175,9 +1279,9 @@ mod tests {
         }
     }
 
-    // The repair pass is the whole canvas, a quadrant per frame per eye: four
-    // steps must tile the panel exactly, stay on the MCU grid, and add up to
-    // nothing more than the canvas it replaces.
+    // The repair pass is the whole canvas, a full-height slice per frame per
+    // eye: four steps must tile the panel exactly, stay on the MCU grid, and add
+    // up to nothing more than the canvas it replaces.
     #[test]
     fn repair_slices_tile_the_panel() {
         let mut area = 0;
@@ -1191,7 +1295,7 @@ mod tests {
                     "{q:?} outside the panel"
                 );
                 area += q.w as usize * q.h as usize;
-                // No overlap with the other quadrants of the same eye.
+                // No overlap with the other slices of the same eye.
                 for other in 0..VIDEO_KEYFRAME_STEPS {
                     if other == step {
                         continue;

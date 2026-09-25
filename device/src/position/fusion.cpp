@@ -1,5 +1,9 @@
 #include "fusion.h"
 
+#include <math.h>
+
+#include "../../config.h"
+
 void Ekf6Dof::begin(const vec3 &bg0) {
   q0_ = 1;
   q1_ = 0;
@@ -13,12 +17,12 @@ void Ekf6Dof::begin(const vec3 &bg0) {
       P_[i][j] = 0;
     }
   }
-  P_[0][0] = 1e-2f;
-  P_[1][1] = 1e-2f;
-  P_[2][2] = 1e-2f;
-  P_[3][3] = 1e-6f;
-  P_[4][4] = 1e-6f;
-  P_[5][5] = 1e-6f;
+  P_[0][0] = EKF_P_ATT_INIT;
+  P_[1][1] = EKF_P_ATT_INIT;
+  P_[2][2] = EKF_P_ATT_INIT;
+  P_[3][3] = EKF_P_BG_INIT;
+  P_[4][4] = EKF_P_BG_INIT;
+  P_[5][5] = EKF_P_BG_INIT;
 }
 
 void Ekf6Dof::predict(float gx, float gy, float gz, float dt) {
@@ -154,7 +158,7 @@ bool Ekf6Dof::updateAccel(float ax, float ay, float az) {
     }
   }
   float r = normDev / EKF_GATE_NORM;
-  float ra = EKF_SIGMA_ACCEL * EKF_SIGMA_ACCEL * (1.0f + 10.0f * r * r);
+  float ra = EKF_SIGMA_ACCEL * EKF_SIGMA_ACCEL * (1.0f + EKF_GATE_SOFT_K * r * r);
   float S[3][3] = {0};
   for (int i = 0; i < 3; ++i) {
     for (int j = 0; j < 3; ++j) {
@@ -247,12 +251,11 @@ bool Ekf6Dof::updateAccel(float ax, float ay, float az) {
     }
   }
   // Bias unobservable when the correction is dominated by linear accel: freeze bg there.
-  if (maha < 0.75f * EKF_GATE_MAHA) {
+  if (maha < EKF_BIAS_FREEZE_MAHA_FRAC * EKF_GATE_MAHA) {
     bg_[0] += dx[3];
     bg_[1] += dx[4];
     bg_[2] += dx[5];
   }
-
   // Joseph form: P = (I-KH)*P*(I-KH)' + K*R*K', R = ra*I_3.
   float IKH[6][6] = {0};
   for (int i = 0; i < 6; ++i) {

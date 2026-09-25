@@ -1,7 +1,6 @@
 #include <Arduino.h> // first: defines RGB_BUILTIN, used by config.h
 #include "config.h"
 #include "src/position/tracker.h"
-#include "packet.h"
 #include "link.h"
 #include "src/display/display.h"
 #include "src/display/video_task.h"
@@ -19,7 +18,7 @@ static void halt(const char *why) {
 }
 
 void setup() {
-  Serial0.begin(921600);
+  Serial0.begin(CONSOLE_BAUD);
   // Initialize the vendor-bulk endpoint on the video task's core before the
   // tracker enters its UART0 calibration window.
   if (!videoTaskStart(display)) {
@@ -42,7 +41,7 @@ void loop() {
   tracker.report(bulkLink.sequence());
   // Video counters: independent 1 Hz gate (tracker.report has its own).
   static unsigned long lastVidMs = 0;
-  if ((unsigned long)(millis() - lastVidMs) >= 1000UL) {
+  if ((unsigned long)(millis() - lastVidMs) >= VIDEO_COUNTER_PERIOD_MS) {
     lastVidMs = millis();
     const VideoStats v = videoTakeStats();
     Serial0.printf("vid %lu drop %lu bad %lu kb %lu rxdrop %lu qhi %lu\n",

@@ -28,6 +28,18 @@ jobs:
       - name: Test
         run: cargo test
 
+  # The cross-half contract producer half. Needs a host g++ and nothing else —
+  # no arduino-cli, no ESP32 core, no cache — so it runs in seconds and is the
+  # gate that actually makes a one-sided device/packet.h edit fail the PR.
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install host g++
+        run: sudo apt-get update && sudo apt-get install -y g++
+      - name: Cross-contract tests
+        run: make test-contract
+
   device:
     runs-on: ubuntu-latest
     steps:

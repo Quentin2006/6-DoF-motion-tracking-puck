@@ -6,8 +6,7 @@ use std::time::{Duration, Instant};
 
 use rusb::{DeviceHandle, Direction, GlobalContext, TransferType};
 
-pub const PUCK_USB_VID: u16 = 0x303a;
-pub const PUCK_USB_PID: u16 = 0x1002;
+use crate::wire::{PUCK_USB_PID, PUCK_USB_VID};
 
 const BENCHMARK_BYTES: usize = 64 * 1024;
 const BENCHMARK_DURATION: Duration = Duration::from_secs(10);
@@ -87,14 +86,13 @@ pub fn run_benchmark_if_requested() -> Option<io::Result<()>> {
 const READ_TIMEOUT: Duration = Duration::from_millis(100);
 const WRITE_TIMEOUT: Duration = Duration::from_millis(250);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 struct EndpointCandidate {
     address: u8,
     direction: Direction,
     transfer_type: TransferType,
 }
 
-#[derive(Debug)]
 struct InterfaceCandidate {
     interface: u8,
     setting: u8,
@@ -259,7 +257,7 @@ impl BulkLink {
             .map_err(|e| self.transfer_error("bulk IN", self.bulk_in, e))
     }
 
-    pub fn write_bulk(&self, buffer: &[u8]) -> io::Result<usize> {
+    fn write_bulk(&self, buffer: &[u8]) -> io::Result<usize> {
         if buffer.is_empty() {
             return Ok(0);
         }
