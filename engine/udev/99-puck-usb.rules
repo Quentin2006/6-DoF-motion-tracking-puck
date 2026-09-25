@@ -1,1 +1,4 @@
-SUBSYSTEM=="usb", ATTR{idVendor}=="303a", ATTR{idProduct}=="1002", MODE="0660", TAG+="uaccess"
+# GROUP is required, not optional: MODE alone leaves the node root:root, and
+# TAG+="uaccess" only works when logind hands the session an ACL. Without a
+# group the node is 0660 root:root and rusb gets EACCES.
+SUBSYSTEM=="usb", ATTR{idVendor}=="303a", ATTR{idProduct}=="1002", GROUP="plugdev", MODE="0660", TAG+="uaccess"
