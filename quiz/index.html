@@ -1,0 +1,611 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>6-DoF Motion Tracking Puck — codebase quiz</title>
+<style>
+  :root {
+    --bg: #14171c; --panel: #1c2027; --line: #2c323c; --ink: #e6e9ef;
+    --dim: #98a1b0; --ok: #3fb950; --bad: #f85149; --accent: #58a6ff;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 24px 20px 80px; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  .sub { color: var(--dim); margin: 0 0 20px; font-size: .92rem; }
+  .tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+  .tab {
+    background: var(--panel); border: 1px solid var(--line); color: var(--dim);
+    border-radius: 999px; padding: 6px 14px; font: inherit; font-size: .88rem;
+    cursor: pointer;
+  }
+  .tab[aria-selected="true"] { color: var(--ink); border-color: var(--accent); }
+  .bar {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px 14px; margin-bottom: 18px; font-size: .88rem;
+  }
+  .bar b { font-variant-numeric: tabular-nums; }
+  .track { flex: 1 1 160px; height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
+  .fill { height: 100%; background: var(--accent); width: 0; transition: width .2s; }
+  .ghost {
+    background: none; border: 1px solid var(--line); color: var(--dim);
+    border-radius: 6px; padding: 5px 11px; font: inherit; font-size: .84rem; cursor: pointer;
+  }
+  .ghost:hover { color: var(--ink); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 20px; }
+  .qhead { display: flex; justify-content: space-between; color: var(--dim); font-size: .82rem; margin-bottom: 10px; }
+  .q { font-size: 1.06rem; margin: 0 0 14px; }
+  pre {
+    background: #0e1116; border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px 14px; overflow-x: auto; font: 13px/1.5 var(--mono);
+    margin: 0 0 16px;
+  }
+  pre .cap { color: #5f6b7d; font-style: italic; }
+  .answers { display: grid; gap: 8px; }
+  .answers button {
+    text-align: left; background: #0e1116; color: var(--ink);
+    border: 1px solid var(--line); border-radius: 8px; padding: 11px 14px;
+    font: inherit; cursor: pointer;
+  }
+  .answers button:hover:not(:disabled) { border-color: var(--accent); }
+  .answers button:disabled { cursor: default; }
+  .answers button.right { border-color: var(--ok); background: #12261a; }
+  .answers button.wrong { border-color: var(--bad); background: #2a1414; }
+  .fb { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 14px; }
+  .fb h3 { margin: 0 0 4px; font-size: .95rem; }
+  .fb.right h3 { color: var(--ok); }
+  .fb.wrong h3 { color: var(--bad); }
+  .cite { color: var(--accent); font: 13px var(--mono); }
+  .why { color: var(--dim); margin: 8px 0 0; }
+  .nav { display: flex; gap: 10px; margin-top: 18px; }
+  .nav button {
+    background: var(--accent); color: #08111d; border: 0; border-radius: 8px;
+    padding: 9px 18px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  .nav button[hidden] { display: none; }
+  .summary li { margin-bottom: 12px; }
+  .summary code { font: 13px var(--mono); color: var(--accent); }
+  .miss { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; background: #0e1116; }
+  .miss .q { font-size: .95rem; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>6-DoF Motion Tracking Puck</h1>
+  <p class="sub">
+    24 questions over the real code and the real measured numbers. Every answer
+    cites the file and line it came from — open it and check. Progress is saved
+    in this browser only.
+  </p>
+
+  <div class="tabs" id="tabs" role="tablist"></div>
+
+  <div class="bar">
+    <span><b id="count">0 / 24</b> answered</span>
+    <span class="track"><span class="fill" id="fill"></span></span>
+    <span id="breakdown" class="sub"></span>
+    <button class="ghost" id="reset">Reset progress</button>
+  </div>
+
+  <div id="app"></div>
+</div>
+
+<script>
+const SECTIONS = [
+  { id: "numbers",  name: "1 · Numbers" },
+  { id: "rationale",name: "2 · Rationale" },
+  { id: "bugs",     name: "3 · Spot the bug" },
+  { id: "layout",   name: "4 · Wire layout" },
+];
+
+const QUESTIONS = [
+  // ---- Section 1: Numbers (what was measured) -----------------------------
+  { s: "numbers", q: "What measured SPI pixel throughput bounds the entire video design?",
+    code: "// 3.38 MB/s of pixels through the polling write path (80 MHz, SPI_CLK_EQU_SYSCLK,",
+    cap: "device/config.h:89",
+    a: ["3.38 MB/s", "17 MB/s", "5.17 MB/s", "62.5 MB/s"],
+    ok: 0,
+    why: "The 62.5 MHz SPI setting cannot actually be reached: the core's integer divider on the 80 MHz APB lands any request from 40 to 70 MHz on the same divider, yielding 40 MHz and 3.38 MB/s of pixels. 5.17 MB/s is real but past the panel's write-cycle spec, so it is not an option." },
+
+  { s: "numbers", q: "At that measured rate, how long is a full both-panel repaint, and what fps is that on its own?",
+    code: "// (2*153600 B at the measured 3.38 MB/s = 90.8 ms for a full both-panel",
+    cap: "device/src/display/video.h:34",
+    a: ["~91 ms, about 9 fps", "~9 ms, about 100 fps", "~17 ms, about 40 fps", "~45 ms, about 20 fps"],
+    ok: 0,
+    why: "Two 240×320 panels is 2×153600 B, which at 3.38 MB/s is 90.8 ms — under 11 fps. That is exactly why nothing in the design ever repaints the whole canvas unless it must." },
+
+  { s: "numbers", q: "Why is the dirty tile 16×16 rather than 8 or 32?",
+    code: "// Dirty-rectangle grid. 16x16 is exactly the 4:2:0 MCU, so a rectangle that is\n// 16-px aligned on every side is a whole number of MCUs and a whole number of\n// tiles, and JPEGDEC's block groups (8 MCUs x 1 at this geometry) never\n// straddle a rectangle edge either.",
+    cap: "device/src/display/video.h:29-32",
+    a: ["16 is exactly the JPEG 4:2:0 MCU, so rectangles are whole MCUs and decode blocks never straddle an edge",
+        "16 is the largest size the panel's controller can address without a page fault",
+        "32 would be faster, but 8 would be smaller — 16 is the measured optimum",
+        "16 keeps every rectangle inside one 240-row panel without clipping"],
+    ok: 0,
+    why: "The tile size is not a tuning knob, it is a consequence of the codec. At 16 a 16-aligned rectangle is a whole number of 4:2:0 MCUs, and JPEGDEC's block groups stay inside the rectangle, so a tile never straddles two decode blocks." },
+
+  { s: "numbers", q: "FUSION_RATE_HZ is 500 but the pose stream is documented as ~250 Hz. Which is the wire rate, and why?",
+    code: "  // Build the QUAT_PACKET_LEN packet (stamp = micros()) and write one\n  // complete FRAME_POSE frame to bulk. Alternates send/skip per call at the\n  // FUSION_RATE_HZ tick, so the wire rate is half of it (~250 Hz at 500 Hz).",
+    cap: "device/link.h:8-10",
+    a: ["250 Hz: fusion runs at 500 Hz but BulkLink::sendQuat alternates send/skip every call",
+        "500 Hz: FUSION_RATE_HZ is the wire rate and the ~250 Hz figure is a typo",
+        "250 Hz: the USB bulk endpoint cannot sustain 500 frames/s",
+        "500 Hz, but every other frame is dropped somewhere downstream"],
+    ok: 0,
+    why: "The filter genuinely runs at 500 Hz; the link deliberately sends on alternating ticks. So the wire rate is half FUSION_RATE_HZ, and any doc that says 250 Hz is describing the transport, not the fusion." },
+
+  { s: "numbers", q: "How long does JPEGDEC take on a full 640×240, and why does that force rectangles?",
+    code: "// decodes nothing that did not change: a full 640x240 decode is ~17 ms of\n// JPEGDEC on this chip (measured, pixel-bound — quality does not move it),\n// which capped the panel near 31 fps however little of the frame differed.",
+    cap: "device/src/display/video.h:15-17",
+    a: ["~17 ms, and it is pixel-bound — quality does not move it",
+        "~17 ms, and it is bandwidth-bound so lowering JPEG quality fixes it",
+        "~1 ms for a typical frame, which is why rectangles were needed",
+        "~90 ms, which is why the SPI blit is the bottleneck"],
+    ok: 0,
+    why: "Decode time tracks pixels, not bytes, so no quality setting avoids it. A full canvas decode capped the panel near 31 fps no matter how little had changed; sending only the changed rectangles drops a typical frame to about 1 ms." },
+
+  { s: "numbers", q: "What is the actual painted frame-rate ceiling, and is it a transport promise?",
+    code: "40 fps is the measured painted capacity, not a transport promise: each frame\nspends roughly 12-15 ms decoding/blitting dirty rectangles plus 3-4 ms reading",
+    cap: "AGENTS.md:66-68",
+    a: ["40 fps, from ~12-15 ms of decode/blit plus 3-4 ms of read and parse — and no, extra USB bandwidth does not raise it",
+        "The USB link's ceiling, so faster transport would raise the panel rate",
+        "40 fps, and it is a promise the sender paces to regardless of decode cost",
+        "Unbounded — the panel can go as fast as the host sends"],
+    ok: 0,
+    why: "40 fps is what the device can actually decode and blit. The fragment size and pacing are unchanged by the transport cutover, so more bandwidth buys nothing; benchmark throughput is raw transport headroom, not a panel guarantee." },
+
+  // ---- Section 2: Rationale (why this design) -----------------------------
+  { s: "rationale", q: "Why not just send a full JPEG every frame and let the device decode the whole canvas?",
+    code: "// decodes nothing that did not change: a full 640x240 decode is ~17 ms of\n// JPEGDEC on this chip (measured, pixel-bound — quality does not move it),",
+    cap: "device/src/display/video.h:15-16",
+    a: ["Decode cost is pixel-bound, so it does not shrink when the scene is static; rectangles make decode track changed area and leave only the SPI blit",
+        "A full JPEG would not fit in the frame buffer",
+        "The host's encoder is too slow to encode 640x240 at 40 fps",
+        "The device's idle RGB cycle would fight the video"],
+    ok: 0,
+    why: "A pixel-bound decode costs the same whether the scene moved or not, so a static scene would still burn 17 ms per frame. Sending only what changed makes the decode cost proportional to the diff, and what remains is the SPI blit, which is already the honest floor." },
+
+  { s: "rationale", q: "Why does the device hold no full-canvas pixels, and what follows from that?",
+    code: "    // room for a shadow (two 320x240 RGB565 shadows are 307 KB against 82 KB\n    // free) and no way to decode less than it is sent. Empty (rects_n == 0)",
+    cap: "engine/src/tracking.rs:89-91",
+    a: ["There is no room for a shadow copy (307 KB needed against 82 KB free), so the host's periodic keyframe is the only repair",
+        "Because the panel controller cannot be read back, so a local copy would go stale anyway",
+        "To save RAM for the JPEG assembly buffer, which is 16 KB",
+        "Because the device has no way to know what the panels currently show"],
+    ok: 0,
+    why: "With rectangles, the device literally cannot reconstruct the canvas, so it cannot repair its own state. That is why the host re-sends the whole canvas on a timer: the keyframe is not redundancy, it is the only repair mechanism that exists." },
+
+  { s: "rationale", q: "Why is the whole-canvas keyframe rolled over 4 frames instead of sent in one?",
+    code: "// It is spread over VIDEO_KEYFRAME_STEPS frames, one slice per eye each:\n// painting a whole canvas is 600 tiles of SPI (~102 ms measured), five times a",
+    cap: "engine/src/tracking.rs:47-49",
+    a: ["A whole canvas is 600 tiles of SPI (~102 ms, five times a 40 fps budget) and sent in one frame it made the panel hitch 144 ms every two seconds; rolled, the worst repair frame is 50-57 ms",
+        "The device's 16 KB assembly buffer cannot hold a full canvas in one blob",
+        "Rolling it guarantees the rectangles stay within VIDEO_RECTS_MAX",
+        "One frame of keyframe would collide with the pose packets on the shared endpoint"],
+    ok: 0,
+    why: "The hitch was measured, not predicted. Rolling the refresh over VIDEO_KEYFRAME_STEPS frames, one full-height slice per eye each, trades a 144 ms stall for a 50-57 ms worst frame that fits inside a normal budget." },
+
+  { s: "rationale", q: "Why full-height vertical slices for the repair pass rather than quadrants?",
+    code: "// tiles wide and the full height. Full height rather than quadrants because the\n// cost that matters is the blit: 75 tiles of SPI (~13 ms measured) plus that\n// frame's dirty box fits inside a 40 fps frame, where a quadrant's 150 tiles did\n// not (58 ms measured).",
+    cap: "engine/src/tracking.rs:55-58",
+    a: ["Measured: a slice is 75 tiles (~13 ms) and fits a 40 fps frame; a quadrant's 150 tiles took 58 ms and did not",
+        "Quadrants cannot be expressed in eye-local coordinates",
+        "Quadrants would need four rectangles per eye and VIDEO_RECTS_MAX is 4",
+        "The SPI controller cannot address the top and bottom of a panel in one window"],
+    ok: 0,
+    why: "The deciding cost is the blit, and it was measured both ways. A quadrant halves the tile count per frame but doubles the frames, and the per-frame 58 ms blew the budget — so the design went to thin full-height strips instead." },
+
+  { s: "rationale", q: "Why inflate R in the EKF *and* keep a hard gate, instead of one or the other?",
+    code: "  // far reject: coast on gyro\n  if (normDev > EKF_GATE_NORM_FAR) {\n  // ...\n  float ra = EKF_SIGMA_ACCEL * EKF_SIGMA_ACCEL * (1.0f + EKF_GATE_SOFT_K * r * r);\n  // ...\n  // chi2 gate\n  if (maha > EKF_GATE_MAHA) {",
+    cap: "device/src/position/fusion.cpp:120,161,206 (three separate gates)",
+    a: ["The soft inflation de-weights near-throttle motion smoothly, and the hard gate rejects only the far outliers, so the filter never chatters at a cliff",
+        "The inflation is a numerical aid; the gate is the real filter",
+        "They are two independent filters left over from an earlier design",
+        "The gate only runs in debug builds"],
+    ok: 0,
+    why: "Inflating R as the residual grows means near-threshold measurements are smoothly trusted less, instead of flipping between accepted and rejected. The hard chi-square gate is then only the last line of defence for true outliers, which is why there is no cliff for the filter to chatter on." },
+
+  { s: "rationale", q: "Why are the two panels set to rotation 1 and 3 rather than both to the same rotation?",
+    code: "constexpr uint8_t TFT_ROTATION[2] = {1, 3};",
+    cap: "device/config.h:85",
+    a: ["They are physically mounted 180° apart, and a 180° flip maps the 16×16 tile grid onto itself, so rectangle geometry is unaffected",
+        "One panel is a different size and needs its own rotation",
+        "Rotation 3 gives panel 1 twice the refresh rate",
+        "The library refuses to share one rotation value between two instances"],
+    ok: 0,
+    why: "The mount is the reason, and the consequence is benign: rotations 1 and 3 are the same 320×240 logical window with both axes reversed, so a rect's eye-local coordinates still mean what they meant and a tile never moves to a different grid position." },
+
+  // ---- Section 3: Spot the bug (real excerpts, each a defect this cleanup fixed)
+  { s: "bugs", q: "A comment says the assembler \"must mirror send_jpeg\". What is wrong, and what is the producer actually called?",
+    code: "// Reassemble one JPEG from its fragments (must mirror send_jpeg in\n// engine/src/tracking.rs, which is the producer). Loss poisons a frame: the",
+    cap: "device/src/display/video.h:135-136 (before this cleanup)",
+    a: ["The symbol does not exist anywhere in the repo; the producer is send_blob",
+        "It is correct — the assembler does mirror send_jpeg",
+        "The producer is send_rects, not send_jpeg",
+        "The comment should say send_mask, which is the real producer"],
+    ok: 0,
+    why: "A grep for send_jpeg returns exactly one hit: the comment. The engine's function that fragments the blob is send_blob, and a reader chasing the named symbol finds nothing. The assembler reassembles a blob of one JPEG per rectangle, not a single JPEG." },
+
+  { s: "bugs", q: "link.cpp called write_available() and then try_write(), which re-checks the same condition. Was the outer branch a bug?",
+    code: "  if (BulkUsb::write_available() < n) {\n    (void)BulkUsb::try_write(frame, n); // account for the non-blocking drop\n    return;\n  }",
+    cap: "device/link.cpp:18-21 (before this cleanup)",
+    a: ["No — it existed only to bump the backpressure-drop counter; try_write re-checks internally, so once the counter was gone the branch was dead",
+        "Yes — it double-counted the drop",
+        "Yes — it raced with the USB interrupt and could send a partial frame",
+        "No — the check avoided a busy-wait inside try_write"],
+    ok: 0,
+    why: "The outer branch called try_write anyway, purely so the tx backpressure counter would tick, then returned. try_write already re-checks availability itself, so the second call was a no-op costing a counter increment nobody read. With the counter deleted, the branch had no remaining purpose." },
+
+  { s: "bugs", q: "A comment justifies a harmless torn counter read. What does it not cover?",
+    code: "// Cross-core display counters: the loop core reads, this task writes. A torn\n// 32-bit read at the 1 Hz boundary is harmless — these are rates, not accounting.",
+    cap: "device/src/display/video_task.cpp:15-16 (before this cleanup)",
+    a: ["The non-atomic reset of those counters: a frame counted between the read and the reset vanishes from the interval",
+        "The counters are read with a plain load, so a torn read is impossible on ESP32",
+        "Nothing — the comment covers the whole story",
+        "The fact that the loop core may read them from a different core than the writer"],
+    ok: 0,
+    why: "A torn read is genuinely harmless for a rate. But videoTakeStats() then resets three counters non-atomically, so a frame the video task counts in that window is silently lost from the interval delta — a different failure from the one the comment waved at." },
+
+  { s: "bugs", q: "A header said \"BulkUsb::begin() must run before USB.begin()\". What was actually being said?",
+    code: "// begin() must run before USB.begin(); all application bytes share this pipe.",
+    cap: "device/src/transport/usb_bulk.h:18 (before this cleanup)",
+    a: ["BulkUsb::begin() is what calls USB.begin(), so the sentence is self-contradictory; the real rule is tinyusb_enable_interface before USB.begin()",
+        "It is correct as written",
+        "It should have said USB.begin() must run before BulkUsb::read()",
+        "It should have named videoTaskStart instead of begin()"],
+    ok: 0,
+    why: "The ordering that actually matters is inside begin(): register the vendor interface with tinyusb_enable_interface, and only then call USB.begin(). The header stated a rule that could not be true, and the real one was stated nowhere." },
+
+  { s: "bugs", q: "A comment claims the last fragment \"lands on the frame's grid point\". Is it right?",
+    code: "// the measured panel-rate limit. Fragment i leaves at frame_start +\n// i*interval/count, so the first piece goes out immediately and the last lands\n// on the frame's grid point.",
+    cap: "engine/src/tracking.rs:240-242 (before this cleanup)",
+    a: ["No — fragment i is scheduled at frame_start + (interval/count)*i, so the last lands one sub-interval early, before the next grid point",
+        "Yes — the sub-intervals exactly partition the frame interval",
+        "Yes — the grid is re-anchored after the last fragment",
+        "No — fragments are sent as fast as the endpoint accepts them"],
+    ok: 0,
+    why: "With count fragments the last one is scheduled at (count-1)/count of the interval, so the frame completes one sub-interval before the next grid point. Harmless in practice, but the comment describes a scheduling behaviour the code does not have." },
+
+  { s: "bugs", q: "config.h said \"the host sends a dirty-tile mask\". Does that frame type exist?",
+    code: "// its own, which is why the host sends a dirty-tile mask and the video task\n// blits only the tiles it names (src/display/video_task.cpp).",
+    cap: "device/config.h:70-71 (before this cleanup)",
+    a: ["No — only FRAME_POSE, FRAME_VIDEO and FRAME_VIDEO_RECT exist; the host writes a rectangle table",
+        "Yes — FRAME_VIDEO_MASK is defined in device/frame.h",
+        "Yes — it is the same bytes as FRAME_VIDEO_RECT with a different name",
+        "No — masks were planned but the mask frame type is still unassigned"],
+    ok: 0,
+    why: "There is no mask anywhere in the tree: no FRAME_VIDEO_MASK, no send_mask, no dirty_mask. The shipped protocol is a rectangle table in a FRAME_VIDEO_RECT frame, so the comment described a design that was replaced and the replacement was never recorded." },
+
+  // ---- Section 4: Wire layout (fill in the blank) -------------------------
+  { s: "layout", q: "What are the 5 bytes of a frame header, and what is the total per-frame overhead?",
+    code: "// Frame: magic 0x55 0xAA | type u8 | len u16 LE | payload[len] | crc u16 LE.",
+    cap: "device/frame.h:11",
+    a: ["magic[2] 0x55 0xAA, type u8, len u16 LE — plus a 2-byte CRC, so 7 bytes of overhead",
+        "magic[2] 0x55 0xAA, type u8, len u16 BE — 5 bytes, CRC included in the header",
+        "magic u8, type u8, len u8, crc u8 — 4 bytes of overhead",
+        "magic[2] 0x55 0xAA, type u8, len u32 LE — 8 bytes of overhead"],
+    ok: 0,
+    why: "Five header bytes plus a trailing 2-byte CRC is 7 bytes of overhead per frame. The host sizes its staging buffers with FRAME_HDR_LEN + FRAME_CRC_LEN for exactly this reason, so both halves can never disagree about the framing overhead." },
+
+  { s: "layout", q: "Give the 36-byte pose payload field order.",
+    code: "//   seq u32 | stamp u32 | quat x,y,z,w f32 | gyro x,y,z f32",
+    cap: "device/packet.h:9",
+    a: ["seq u32, stamp u32, quat x,y,z,w f32, gyro x,y,z f32 — all little-endian",
+        "seq u32, stamp u32, quat w,x,y,z f32, gyro x,y,z f32",
+        "stamp u32, seq u32, quat x,y,z,w f32, gyro x,y,z f32",
+        "seq u32, quat x,y,z,w f32, stamp u32, gyro x,y,z f32"],
+    ok: 0,
+    why: "The quaternion is x,y,z,w specifically so it matches Quat::from_xyzw on the engine side without a reorder. Both halves are little-endian on their own hardware, so no byte-swapping happens anywhere; tests/packet_fixture.txt pins the exact 36 bytes from both sides." },
+
+  { s: "layout", q: "Which bytes does the frame CRC cover?",
+    code: "  uint16_t crc = 0xFFFF;\n  crc = frame_crc_feed(crc, type);\n  crc = frame_crc_feed(crc, out[3]);\n  crc = frame_crc_feed(crc, out[4]);\n  for (uint16_t i = 0; i < len; i++) {\n    crc = frame_crc_feed(crc, payload[i]);\n  }",
+    cap: "device/frame.h:40-46",
+    a: ["type, the two len bytes, and the payload — the magic and the CRC itself are excluded",
+        "The whole frame including the magic, so a corrupt magic is caught by the CRC",
+        "The payload only, so the header can be skipped cheaply",
+        "Everything before the CRC plus the CRC's own high byte"],
+    ok: 0,
+    why: "The magic is excluded because hunting for it is how the parser resynchronizes after garbage; if the magic were covered, a lost byte would look like a bad frame rather than a resync. The CRC covers type + len + payload, CRC-16/CCITT-FALSE, so a payload byte flip is always detected." },
+
+  { s: "layout", q: "A FRAME_VIDEO_RECT payload is 4 bytes plus 11 per rectangle. What is in each?",
+    code: "  memcpy(&hdr.frame, pkt + 0, 2);\n  memcpy(&hdr.rects, pkt + 2, 2);\n  // ...\n  const uint8_t *r = pkt + 4 + i * VIDEO_RECT_LEN;\n  out.eye = r[0];\n  memcpy(&out.x, r + 1, 2);\n  // then y, w, h, jpeg_len at +3, +5, +7, +9",
+    cap: "device/src/display/video.h:64-83 (elided; the trailing note is editorial)",
+    a: ["header: frame u16 + rects u16; per rectangle: eye u8, then x, y, w, h, jpeg_len as u16 LE",
+        "header: frame u32 + rects u32; per rectangle: eye u8 then five u16 BE values",
+        "header: frame u16 + rects u16; per rectangle: x, y, w, h u16 LE then eye u8 then jpeg_len u32",
+        "header: frame u16 + rects u8; per rectangle: all eleven bytes as a raw struct"],
+    ok: 0,
+    why: "The two-byte header names the frame the table belongs to and how many rectangles follow, so a table cannot paint a different frame's blob. Each rectangle's 11 bytes are eye first, then the five little-endian u16s, which is why the device can memcpy them straight into a struct." },
+
+  { s: "layout", q: "A rectangle arrives with x = 4. What is wrong, and which bounds must every rectangle satisfy?",
+    code: "    if ((out.x % VIDEO_TILE) != 0 || (out.y % VIDEO_TILE) != 0 || (out.w % VIDEO_TILE) != 0 ||\n        (out.h % VIDEO_TILE) != 0) {\n      return false;\n    }",
+    cap: "device/src/display/video.h:82-85",
+    a: ["x = 4 is not 16-aligned, so it is not a whole MCU count and the JPEG will not line up; every rect needs eye ≤ 1, non-zero w/h/jpeg_len, 16-aligned x/y/w/h, x+w ≤ 320, y+h ≤ 240, and a total blob ≤ 16384",
+        "Nothing is wrong — the parser rounds x down to the tile grid",
+        "x = 4 is fine, but y must be 16-aligned too or the frame is rejected",
+        "x = 4 is rejected only because it is not a multiple of 4, the MCU quarter-size"],
+    ok: 0,
+    why: "Every bound is checked in parse_video_rects_hdr because the decode path trusts the table: a rect past the panel edge would blit outside the address window, and a rect that is not MCU-aligned would not line up with the JPEG that follows it." },
+
+  { s: "layout", q: "A FRAME_VIDEO fragment header is 8 bytes of four u16s. Which are they, and may they arrive out of order?",
+    code: "struct VideoFragHdr {\n  uint16_t frame;\n  uint16_t frag;\n  uint16_t count;\n  uint16_t len;\n};",
+    cap: "device/src/display/video.h:111-116,166-170",
+    a: ["frame, frag, count, len — and no, fragments must arrive in order; any gap abandons the frame, so a lost fragment costs exactly one frame and never a spliced image",
+        "frame, frag, count, len — and yes, they may arrive in any order because the assembler reorders them",
+        "seq, offset, total, len — and out-of-order is fine as long as count matches",
+        "frame, frag, count, len — a gap is retried until the missing fragment arrives"],
+    ok: 0,
+    why: "The byte stream is ordered, so any index other than the expected one means bytes were lost and the frame cannot be repaired. The assembler poisons the frame on a gap instead of splicing two images together, which is what bounds the cost of a loss at exactly one frame." },
+];
+
+// Deterministic answer order. Every question listed its correct answer first,
+// which made the quiz guessable; this rotates each question's choices by a hash
+// of its own text, so the position is stable across reloads and saved progress
+// but is not correlated with correctness.
+function shuffled(q) {
+  const n = q.a.length;
+  let h = 2166136261;
+  for (let i = 0; i < q.q.length; i++) {
+    h ^= q.q.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  const shift = (h >>> 0) % n;
+  const order = q.a.map((_, i) => (i + shift) % n);
+  return { order, text: order.map(i => q.a[i]), ok: order.indexOf(q.ok) };
+}
+
+// --- state ------------------------------------------------------------------
+const KEY = "puck-quiz-v1";
+let state = load();
+
+function load() {
+  const blank = { answers: {}, section: "numbers", done: false };
+  try {
+    const raw = localStorage.getItem(KEY);
+    if (!raw) return blank;
+    const p = JSON.parse(raw);
+    if (!p || typeof p.answers !== "object") return blank;
+    return { answers: p.answers, section: p.section || "numbers", done: !!p.done };
+  } catch (e) {
+    return blank;
+  }
+}
+function save() {
+  try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {}
+}
+
+const app = document.getElementById("app");
+const tabs = document.getElementById("tabs");
+// Only real answers count: the "@section" keys are per-section cursors, and
+// counting them inflated the total by one per section.
+const answered = () => Object.keys(state.answers).filter(k => !k.startsWith("@")).length;
+
+function render() {
+  save();
+  renderTabs();
+  renderBar();
+  if (state.done) return renderSummary();
+  const list = QUESTIONS.filter(q => q.s === state.section);
+  const idx = state.answers["@" + state.section];
+  const n = (typeof idx === "number" ? idx : 0);
+  renderQuestion(list, n);
+}
+
+function renderTabs() {
+  tabs.innerHTML = "";
+  for (const s of SECTIONS) {
+    const b = document.createElement("button");
+    b.className = "tab";
+    b.setAttribute("role", "tab");
+    b.setAttribute("aria-selected", String(s.id === state.section));
+    const n = QUESTIONS.filter(q => q.s === s.id).length;
+    const a = QUESTIONS.filter(q => q.s === s.id && state.answers[q.q]).length;
+    b.textContent = `${s.name} — ${a}/${n}`;
+    b.onclick = () => { state.section = s.id; render(); };
+    tabs.appendChild(b);
+  }
+}
+
+function renderBar() {
+  document.getElementById("count").textContent = `${answered()} / ${QUESTIONS.length}`;
+  document.getElementById("fill").style.width = (answered() / QUESTIONS.length * 100) + "%";
+  document.getElementById("breakdown").textContent =
+    SECTIONS.map(s => {
+      const n = QUESTIONS.filter(q => q.s === s.id).length;
+      const a = QUESTIONS.filter(q => q.s === s.id && state.answers[q.q]).length;
+      return `${s.name.split("·")[1].trim()} ${a}/${n}`;
+    }).join(" · ");
+}
+
+function renderQuestion(list, n) {
+  const q = list[n];
+  if (!q) { state.done = true; return render(); }
+  const chosen = state.answers[q.q];
+  const answeredThis = chosen !== undefined;
+  // Choices are rotated deterministically per question, and the stored answer
+  // is the *displayed* index, so saved progress survives a reload.
+  const v = shuffled(q);
+
+  app.innerHTML = "";
+  const card = document.createElement("div");
+  card.className = "card";
+
+  const head = document.createElement("div");
+  head.className = "qhead";
+  head.innerHTML = `<span>${SECTIONS.find(s => s.id === q.s).name}</span>` +
+                    `<span>Question ${n + 1} of ${list.length}</span>`;
+  card.appendChild(head);
+
+  const qt = document.createElement("p");
+  qt.className = "q";
+  qt.textContent = q.q;
+  card.appendChild(qt);
+
+  if (q.code) {
+    const pre = document.createElement("pre");
+    pre.textContent = q.code;
+    const cap = document.createElement("span");
+    cap.className = "cap";
+    cap.textContent = "\n// " + q.cap;
+    pre.appendChild(cap);
+    card.appendChild(pre);
+  }
+
+  const answers = document.createElement("div");
+  answers.className = "answers";
+  v.text.forEach((text, i) => {
+    const b = document.createElement("button");
+    b.textContent = text;
+    if (answeredThis) {
+      b.disabled = true;
+      if (i === v.ok) b.classList.add("right");
+      else if (i === chosen) b.classList.add("wrong");
+    } else {
+      // Record the answer and re-render the same card, so the feedback panel
+      // (answer, citation, why) is what the reader sees next. Advancing is the
+      // Next button's job — jumping away here hid the explanation entirely.
+      b.onclick = () => {
+        state.answers[q.q] = i;
+        render();
+      };
+    }
+    answers.appendChild(b);
+  });
+  card.appendChild(answers);
+
+  if (answeredThis) {
+    const fb = document.createElement("div");
+    const right = chosen === v.ok;
+    fb.className = "fb " + (right ? "right" : "wrong");
+    const h = document.createElement("h3");
+    h.textContent = right ? "Correct." : "Not quite — the answer is:";
+    fb.appendChild(h);
+    const ans = document.createElement("div");
+    ans.innerHTML = `<b>${v.text[v.ok]}</b>`;
+    fb.appendChild(ans);
+    const cite = document.createElement("div");
+    cite.className = "cite";
+    cite.textContent = q.cap;
+    fb.appendChild(cite);
+    const why = document.createElement("p");
+    why.className = "why";
+    why.textContent = q.why;
+    fb.appendChild(why);
+    card.appendChild(fb);
+  }
+
+  const nav = document.createElement("div");
+  nav.className = "nav";
+  if (n > 0) {
+    const prev = document.createElement("button");
+    prev.className = "ghost";
+    prev.textContent = "← Previous";
+    prev.onclick = () => { state.answers["@" + state.section] = n - 1; render(); };
+    nav.appendChild(prev);
+  }
+  if (answeredThis && n + 1 < list.length) {
+    const next = document.createElement("button");
+    next.textContent = "Next →";
+    next.onclick = () => { state.answers["@" + state.section] = n + 1; render(); };
+    nav.appendChild(next);
+  }
+  if (answeredThis && n + 1 >= list.length) {
+    const next = document.createElement("button");
+    next.textContent = "Next section →";
+    next.onclick = () => {
+      const s = SECTIONS.findIndex(x => x.id === state.section);
+      if (s + 1 < SECTIONS.length) {
+        state.section = SECTIONS[s + 1].id;
+        state.answers["@" + state.section] = 0;
+      } else {
+        state.done = true;
+      }
+      render();
+    };
+    nav.appendChild(next);
+  }
+  card.appendChild(nav);
+  app.appendChild(card);
+}
+
+function renderSummary() {
+  // The summary lists the source order, so compare against each question's
+  // rotated correct index.
+  const missed = QUESTIONS.filter(q => state.answers[q.q] !== shuffled(q).ok);
+  const wrong = QUESTIONS.filter(q => {
+    const a = state.answers[q.q];
+    return a !== undefined && a !== shuffled(q).ok;
+  });
+  app.innerHTML = "";
+  const card = document.createElement("div");
+  card.className = "card";
+  const h = document.createElement("p");
+  h.className = "q";
+  h.innerHTML = `<b>${answered()} / ${QUESTIONS.length}</b> answered — ` +
+                `<b>${QUESTIONS.length - wrong.length}</b> correct, ` +
+                `<b>${wrong.length}</b> wrong, <b>${QUESTIONS.length - answered()}</b> skipped.`;
+  card.appendChild(h);
+
+  if (missed.length === 0) {
+    const p = document.createElement("p");
+    p.className = "why";
+    p.textContent = "Every question correct. You have the numbers, the rationale, and the byte layout.";
+    card.appendChild(p);
+  } else {
+    const sub = document.createElement("p");
+    sub.className = "why";
+    sub.textContent = "Worth a second look:";
+    card.appendChild(sub);
+    const ul = document.createElement("ul");
+    ul.className = "summary";
+    for (const q of missed) {
+      const li = document.createElement("li");
+      const box = document.createElement("div");
+      box.className = "miss";
+      const qq = document.createElement("div");
+      qq.className = "q";
+      qq.textContent = q.q;
+      box.appendChild(qq);
+      const a = document.createElement("div");
+      a.innerHTML = `→ <b>${shuffled(q).text[shuffled(q).ok]}</b>`;
+      box.appendChild(a);
+      const c = document.createElement("div");
+      c.className = "cite";
+      c.textContent = q.cap;
+      box.appendChild(c);
+      const w = document.createElement("p");
+      w.className = "why";
+      w.textContent = q.why;
+      box.appendChild(w);
+      li.appendChild(box);
+      ul.appendChild(li);
+    }
+    card.appendChild(ul);
+  }
+
+  const nav = document.createElement("div");
+  nav.className = "nav";
+  const again = document.createElement("button");
+  again.textContent = "Review the sections";
+  again.onclick = () => { state.done = false; render(); };
+  nav.appendChild(again);
+  card.appendChild(nav);
+  app.appendChild(card);
+}
+
+document.getElementById("reset").onclick = () => {
+  state = { answers: {}, section: "numbers", done: false };
+  save();
+  render();
+};
+
+render();
+</script>
+</body>
+</html>

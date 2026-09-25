@@ -82,5 +82,20 @@ window has keyboard focus.
 - **red** — booting / calibrating / not ready
 - **green** — calibrated, streaming pose over USB vendor bulk
 
+## Learn the codebase
+
+24 questions over the real code and the real measured numbers — what the SPI
+throughput is and why it bounds everything, why rectangles instead of full
+JPEGs, the comments that used to describe a protocol that never shipped, and
+the exact byte layout of a frame, a pose payload, and a rectangle table. Every
+answer cites the file and line it came from.
+
+```sh
+make quiz-open   # or just open quiz/index.html
+```
+
+One self-contained file, no build step, no network. Progress is kept in the
+browser's localStorage.
+
 See [AGENTS.md](AGENTS.md) for detailed architecture, conventions, and the
 device↔engine wire contract.
