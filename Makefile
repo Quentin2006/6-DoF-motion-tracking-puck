@@ -21,7 +21,10 @@ usb-permissions:
 device: compile upload monitor
 lsp:
 	arduino-cli compile --clean --fqbn $(FQBN) --only-compilation-database --build-path ./build ./device/
-	jq '[.[] | .file |= (sub("build/sketch/"; "device/") | sub("\\.ino\\.cpp$$"; ".ino")) | . as $$e | .arguments |= ([.[0]] + (if ($$e.file | endswith(".ino")) then ["-x", "c++"] else [] end) + (.[1:] | map(select(. != "-MMD" and . != "-o" and (test("\\.o$$") | not) and (test("build/file_opts$$") | not)) | gsub("build/sketch/"; "device/") | sub("\\.ino\\.cpp$$"; ".ino"))))]' build/compile_commands.json > compile_commands.json
+	# --sysroot comes from the xtensa toolchain arduino-cli just used, derived
+	# from its own compiler path, so .clangd needs no contributor-specific path.
+	sysroot="$$(dirname "$$(dirname "$$(jq -r '.[0].arguments[0]' build/compile_commands.json)")")/xtensa-esp-elf" && \
+	jq --arg sysroot "$$sysroot" '[.[] | .file |= (sub("build/sketch/"; "device/") | sub("\\.ino\\.cpp$$"; ".ino")) | . as $$e | .arguments |= ([.[0]] + (if ($$e.file | endswith(".ino")) then ["-x", "c++"] else [] end) + (.[1:] | map(select(. != "-MMD" and . != "-o" and (test("\\.o$$") | not) and (test("build/file_opts$$") | not)) | gsub("build/sketch/"; "device/") | sub("\\.ino\\.cpp$$"; ".ino"))) + ["--sysroot=" + $$sysroot])]' build/compile_commands.json > compile_commands.json
 
 engine:
 	cd engine && cargo run

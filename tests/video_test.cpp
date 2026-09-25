@@ -1,6 +1,6 @@
 // Host test for the video fragment contract (device/src/display/video.h).
 // Two things are under test: the pinned wire bytes of one fragment (produced by
-// send_jpeg in engine/src/tracking.rs) and the assembler that puts a frame back
+// send_blob in engine/src/tracking.rs) and the assembler that puts a frame back
 // together on the device.
 // Fails on: header field order/endianness, CRC over the wrong span, a lost
 // fragment spliced into a frame, out-of-order fragments accepted, or an
@@ -229,7 +229,7 @@ int main() {
     CHECK(h.rects == 2 && h.rect[1].eye == 1 && h.rect[1].y == 112, "second rect fields");
     CHECK(video_rects_blob_len(h) == 3000, "two-rect blob length");
 
-    // A repair frame: a dirty box plus a quadrant per eye, all four together.
+    // A repair frame: a dirty box plus a repair slice per eye, four rects total.
     {
       put(0, 0, 32, 48, 96, 64, 500);
       put(1, 1, 0, 128, 160, 112, 400);

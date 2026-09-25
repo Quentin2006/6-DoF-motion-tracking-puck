@@ -98,13 +98,14 @@ throughput is raw transport headroom, not a 60-fps panel guarantee.
 `device/packet.h`, `device/src/display/video.h` and `engine/src/tracking.rs`
 hard-code the same framed bulk protocol by hand; there is no shared crate or
 serializer. The 36-byte pose payload (`QUAT_PACKET_LEN_V2`) inside a
-`FRAME_POSE` frame, the `FRAME_VIDEO_MASK` dirty-tile mask, and the 640×240
-baseline-JPEG stereo-pair fragments (`VIDEO_*`), **must match in both halves**.
-Both x86 and ESP32 are little-endian, so no byte-swapping is done.
+`FRAME_POSE` frame, the `FRAME_VIDEO_RECT` rectangle table, and the
+640×240 baseline-JPEG stereo-pair fragments (`FRAME_VIDEO`), **must match in
+both halves**. Both x86 and ESP32 are little-endian, so no byte-swapping is
+done.
 
 The fragment layout is **canonical in `device/src/display/video.h`**
 (`VideoFragAssembler`, host-compilable, no Arduino deps; the engine's
-`send_jpeg` is the producer). `tests/video_test.cpp` and
+`send_blob` is the producer). `tests/video_test.cpp` and
 `tracking.rs::video_fragment_wire_layout_is_pinned` assert the same literal
 bytes for one fragment, so a one-sided layout change fails `make test`.
 
@@ -124,9 +125,9 @@ slice per eye each, plus that frame's dirty rectangles: the whole canvas is 600
 tiles of SPI (~102 ms measured, five times a 40 fps frame budget) and sending it
 in one frame made the panel hitch for 144 ms every two seconds. Rolled, the
 worst repair frame measured 50-57 ms instead. The engine's
-`send_mask`/`dirty_mask` are the producer, and
-`tracking.rs::video_mask_wire_layout_is_pinned` + `dirty_mask_covers_exactly_the_changed_tiles`
-assert the same bytes and the same tile-bit mapping as `tests/video_test.cpp`.
+`send_rects`/`dirty_rects` are the producer, and
+`tracking.rs::video_rect_frame_wire_layout_is_pinned` + `dirty_rects_cover_exactly_the_changed_tiles`
+assert the same bytes and the same rectangle bounds as `tests/video_test.cpp`.
 
 The packet byte layout is **canonical in `device/packet.h`**
 (`build_quat_packet`, host-compilable, no Arduino deps); `link.cpp`
@@ -203,7 +204,6 @@ make test              # Rust + packet/framing/video host contract tests
 ## Runtime / Tooling Preferences
 
 - **Device toolchain:** `arduino-cli` with ESP32 core (had `3.3.11` at `~/.arduino15/packages/esp32/hardware/esp32/`), xtensa toolchain `esp-x32/2601`. Not PlatformIO.
-- **Secrets:** `device/secrets.h` is **gitignored and unused by the firmware** (no includer; transport is USB, no WiFi). If it exists locally, never commit it.
 - **`compile_commands.json` is generated** (`make lsp`); never hand-edit it. Regenerate after changing a sketch source or arduino-cli options — it is what makes clangd handle `.ino` files (via injected `-x c++`).
 - `RFC 2119`-style MUSTs above follow from these facts.
 
@@ -217,8 +217,7 @@ code/document change an agent makes here.
    Use a short `topic` that names the change (the repo uses numbered `cycle-N-...`
    branches for sequenced work, e.g. `cycle6-tests`); keep the branch
    single-purpose.
-2. **Commit** atomic, one logical change per commit. `device/secrets.h` is
-   gitignored — never stage it. Verify before committing:
+2. **Commit** atomic, one logical change per commit. Verify before committing:
    - device change → `make compile`
    - engine change → `cargo build` (or `make engine`)
    - wire-contract / test change → `make test`
@@ -237,9 +236,6 @@ Multi-step efforts are split into dependency-ordered PRs (one logical change
 each) and merged sequentially — never batch unrelated changes. The device↔engine
 wire contract is the one thing that can break silently: if either half changes
 the packet format, `make test` is the gate.
-
-**Secrets stay local.** `device/secrets.h` is gitignored and unused (no WiFi
-transport); never commit it if it exists locally.
 
 ## Testing & QA
 
@@ -274,7 +270,7 @@ verification stays manual.
 - **CI (`.github/workflows/ci.yml`)** runs `cargo test` on the engine and
   `arduino-cli compile --fqbn esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=default,UploadMode=default device` on the
   firmware (same FQBN as the Makefile; it installs libusb plus the Adafruit display libs
-  and JPEGDEC). No secrets step: the firmware compiles without `device/secrets.h`.
+  and JPEGDEC).
 
 **Still manual / no automation:**
 - **Compile gate** locally: `make compile` — keep green after any `device/` change.

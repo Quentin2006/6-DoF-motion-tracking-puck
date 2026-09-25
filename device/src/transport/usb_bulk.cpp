@@ -32,9 +32,10 @@ std::atomic<uint16_t> sRxQueueHighWaterChunks{0};
 
 volatile uint32_t sRxBytes = 0;
 volatile uint32_t sRxOverflowBytes = 0;
-volatile uint32_t sTxBytes = 0;
-volatile uint32_t sTxBackpressureDrops = 0;
-volatile uint32_t sTxWriteErrors = 0;
+
+// The only mount check in the class: TinyUSB reports zero available bytes while
+// the vendor interface is down, so a not-mounted device cannot be written.
+static bool mounted() { return sBegun && tud_vendor_n_mounted(0); }
 
 BulkUsbStats sLastStats;
 
@@ -125,10 +126,6 @@ bool BulkUsb::begin() {
   return true;
 }
 
-bool BulkUsb::mounted() {
-  return sBegun && tud_vendor_n_mounted(0);
-}
-
 size_t BulkUsb::read(uint8_t *dst, size_t cap) {
   if (!sBegun || dst == nullptr || cap == 0) {
     return 0;
@@ -157,23 +154,14 @@ size_t BulkUsb::read(uint8_t *dst, size_t cap) {
   return total;
 }
 
-size_t BulkUsb::write_available() {
-  return mounted() ? tud_vendor_n_write_available(0) : 0;
-}
-
 bool BulkUsb::try_write(const uint8_t *src, size_t len) {
-  if (src == nullptr || len == 0) {
-    return false;
-  }
-  if (!mounted() || tud_vendor_n_write_available(0) < len) {
-    ++sTxBackpressureDrops;
+  if (src == nullptr || len == 0 || !mounted() || tud_vendor_n_write_available(0) < len) {
     return false;
   }
 
   const uint32_t written = tud_vendor_n_write(0, src, len);
   if (written != len) {
     tud_vendor_n_write_clear(0);
-    ++sTxWriteErrors;
     return false;
   }
   const uint32_t flushed = tud_vendor_n_write_flush(0);
@@ -181,24 +169,18 @@ bool BulkUsb::try_write(const uint8_t *src, size_t len) {
   // is already buffered and TinyUSB will auto-flush it. Any non-zero short
   // flush is a real partial-frame failure.
   if (flushed != 0 && flushed != len) {
-    ++sTxWriteErrors;
     return false;
   }
-
-  sTxBytes += len;
   return true;
 }
 
 BulkUsbStats BulkUsb::takeStats() {
   const BulkUsbStats current{
-      sRxBytes, sRxOverflowBytes, sTxBytes, sTxBackpressureDrops, sTxWriteErrors,
+      sRxBytes, sRxOverflowBytes,
       sRxQueueHighWaterChunks.load(std::memory_order_relaxed)};
   const BulkUsbStats delta{
       current.rxBytes - sLastStats.rxBytes,
       current.rxOverflowBytes - sLastStats.rxOverflowBytes,
-      current.txBytes - sLastStats.txBytes,
-      current.txBackpressureDrops - sLastStats.txBackpressureDrops,
-      current.txWriteErrors - sLastStats.txWriteErrors,
       current.rxQueueHighWaterChunks,
   };
   sLastStats = current;

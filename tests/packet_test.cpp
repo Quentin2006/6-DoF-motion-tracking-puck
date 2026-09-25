@@ -55,9 +55,9 @@ int main(int argc, char **argv) {
   float quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
   float gyro[3] = {0.5f, -0.25f, 1.5f};
 
-  uint8_t pkt[QUAT_PACKET_LEN_V2];
+  uint8_t pkt[QUAT_PACKET_LEN];
   size_t n = build_quat_packet(pkt, seq, stamp, quat, gyro);
-  if (n != QUAT_PACKET_LEN_V2) {
+  if (n != QUAT_PACKET_LEN) {
     std::fprintf(stderr, "packet_test: bad length %zu\n", n);
     return 1;
   }

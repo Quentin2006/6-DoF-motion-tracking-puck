@@ -1,5 +1,9 @@
 #include "still_detect.h"
 
+#include <math.h>
+
+#include "../../config.h"
+
 void StillDetector::reset() {
   sum_[0] = sum_[1] = sum_[2] = 0.0f;
   sumsq_[0] = sumsq_[1] = sumsq_[2] = 0.0f;

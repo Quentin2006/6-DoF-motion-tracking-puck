@@ -1,6 +1,7 @@
 #include <math.h>
 #include <string.h>
 #include <Preferences.h>
+#include <Wire.h>
 #include "mpu6050.h"
 #include "../../config.h"
 
@@ -21,7 +22,7 @@ constexpr uint8_t kAccelConfigReg = 0x1C;
 
 bool Mpu6050::begin() {
   Wire.begin(static_cast<uint8_t>(SDA_PIN), static_cast<uint8_t>(SCL_PIN));
-  Wire.setClock(400000);
+  Wire.setClock(I2C_CLOCK_HZ);
 
   if (!writeReg(kPwrMgmt1Reg, 0x00)) {
     return false;
@@ -77,11 +78,6 @@ bool Mpu6050::readAccel(vec3 &out) {
   return true;
 }
 
-bool Mpu6050::readRawAccel(vec3 &out) {
-  // CAL6-only: raw m/s², bypasses accOff_/accScale_/accel_bias.
-  return readBurst6(kAccelBase, ACCEL_LSB_O_MPS2, out);
-}
-
 // Mean of GYRO_CALIB_SAMPLES bursts spaced MPU_CALIB_DELAY_MS apart.
 bool Mpu6050::meanBurst(uint8_t baseReg, float scale, vec3 &out) {
   vec3 total, s;
@@ -117,7 +113,7 @@ bool Mpu6050::getAccelBias() {
     return false;
   }
   // The 6-point cal is per-axis affine, so applying it to the mean equals
-  // applying it per sample (the old getAccelBias did the latter).
+  // applying it per sample.
   m = applyAccelCal(m);
   const float n = sqrtf(m.x * m.x + m.y * m.y + m.z * m.z);
   if (n < 1e-9f) {
@@ -211,6 +207,8 @@ void Mpu6050::saveAccelCal() const {
 // One still-detect bias step (dps), clamped so a single noisy window cannot
 // yank the bias.
 void Mpu6050::nudgeGyroBias(const vec3 &meanDps, float alpha) {
+  // dps per tick, not a filter sigma: numerically equal to EKF_SIGMA_GYRO but
+  // in different units, so the two are not the same knob and must not merge.
   constexpr float kMaxStepDps = 0.002f;
   float *bias[3] = {&gyro_bias.x, &gyro_bias.y, &gyro_bias.z};
   const float step[3] = {alpha * meanDps.x, alpha * meanDps.y, alpha * meanDps.z};

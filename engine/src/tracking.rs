@@ -5,6 +5,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::usb_bulk::BulkLink;
+use crate::wire::*;
 use bevy::camera::{RenderTarget, Viewport};
 use bevy::prelude::*;
 use bevy::render::gpu_readback::{Readback, ReadbackComplete};
@@ -14,50 +15,38 @@ use bevy::render::render_resource::{TextureFormat, TextureUsages};
 #[derive(Component)]
 struct LookRig;
 
-// must match device/packet.h QUAT_PACKET_LEN_V2 (pose payload inside a FRAME_POSE frame)
-const PACKET_LEN: usize = 36;
-
-// Framed vendor-bulk contract, mirroring device/frame.h (not a shared crate).
-const FRAME_MAGIC_0: u8 = 0x55;
-const FRAME_MAGIC_1: u8 = 0xAA;
-const FRAME_POSE: u8 = 0x01;
-const FRAME_VIDEO: u8 = 0x02; // one blob fragment: 8 B header + <= 1280 B
-const FRAME_VIDEO_RECT: u8 = 0x05; // the frame's dirty rectangles: 4 + 11*rects B
-const FRAME_MAX_PAYLOAD: usize = 1288; // 8 + VIDEO_FRAG_MAX
+// The wire contract itself (frame types, lengths, canvas geometry) is
+// generated: see crate::wire and tools/wire_spec.json.
 
 // Transport+render delay extrapolated from packet gyro, and display smoothing.
 const PREDICT_TAU_S: f32 = 0.008;
 const SMOOTH_TAU_S: f32 = 0.006;
 
-// Video stream to the puck: the stereo pair as one or two baseline JPEGs
-// covering only the rectangles that changed, fragmented into FRAME_VIDEO
+// Video stream to the puck: the stereo pair as one baseline JPEG per dirty
+// rectangle (up to VIDEO_RECTS_MAX), fragmented into FRAME_VIDEO
 // frames and preceded by a FRAME_VIDEO_RECT frame with the rectangle table.
-// Must match device/src/display/video.h VIDEO_* constants.
+// The VIDEO_* geometry itself is generated (crate::wire).
 //
 // Decoding the whole 640x240 canvas every frame costs the device ~17 ms of
 // JPEGDEC (pixel-bound: measured, and quality does not move it), which capped
 // the panel near 31 fps no matter how little of the frame differed. Sending
 // only the dirty rectangles drops that to ~1 ms for a typical frame, leaving
 // the dirty-area SPI blit as the cost.
-const VIDEO_W: usize = 640;
-const VIDEO_H: usize = 240;
-const VIDEO_PANEL_W: usize = 320; // one panel's half of the canvas, i.e. one eye
-const VIDEO_TILE: usize = 16; // tile grid == the 4:2:0 MCU the device decodes
-const VIDEO_RECTS_MAX: usize = 4; // dirty bbox + repair quadrant, per eye
-const VIDEO_RECT_LEN: usize = 11; // eye u8 | x,y,w,h u16 LE | jpeg_len u16 LE
-const VIDEO_FRAG_MAX: usize = 1280; // JPEG bytes per fragment; 8 + this = FRAME_MAX_PAYLOAD
-const VIDEO_JPEG_MAX: usize = 16384; // device assembly buffer, and the largest blob accepted
 const JPEG_QUALITY: u8 = 75; // the one knob trading fidelity for frame rate
 const VIDEO_TARGET_FPS: u64 = 40;
-const VIDEO_HEARTBEAT_MS: u64 = 2000; // static scene: re-send so the device stays in video mode
+// Static scene: re-send so the device stays in video mode. This is the one
+// cross-half inequality: it must stay below the device's VIDEO_IDLE_MS (10 s in
+// device/config.h), because the heartbeat exists only to keep the device out of
+// its idle RGB cycle, and neither half's own constants would catch a violation.
+const VIDEO_HEARTBEAT_MS: u64 = 2000;
 // Re-send the whole canvas at least this often, changed or not. With rectangles
 // the device holds no full-canvas pixels, so this is the only repair for panels
 // it repainted itself (the idle RGB cycle) and for whatever a lost frame left
 // stale.
 //
-// It is spread over KEYFRAME_STEPS frames, one slice per eye each: painting a
-// whole canvas is 600 tiles of SPI (~102 ms measured), five times a 40 fps
-// frame budget, and doing it in one frame made the panel hitch every two
+// It is spread over VIDEO_KEYFRAME_STEPS frames, one slice per eye each:
+// painting a whole canvas is 600 tiles of SPI (~102 ms measured), five times a
+// 40 fps frame budget, and doing it in one frame made the panel hitch every two
 // seconds. Rolled, each repair frame is one slice more than a normal one.
 const VIDEO_KEYFRAME_MS: u64 = 2000;
 const VIDEO_KEYFRAME_STEPS: usize = 4;
@@ -172,7 +161,7 @@ fn frame_crc_feed(mut crc: u16, b: u8) -> u16 {
 }
 
 // Build one frame (magic + type + len LE + payload + crc LE) into `out`.
-// Caller must size `out` >= 7 + payload.len().
+// Caller must size `out` >= FRAME_HDR_LEN + FRAME_CRC_LEN + payload.len().
 fn build_frame(out: &mut [u8], ty: u8, payload: &[u8]) -> usize {
     let len = payload.len() as u16;
     out[0] = FRAME_MAGIC_0;
@@ -211,7 +200,7 @@ fn send_rects<W: Write>(writer: &mut W, id: u16, rects: &[Rect], lens: &[usize])
         payload[o + 7..o + 9].copy_from_slice(&r.h.to_le_bytes());
         payload[o + 9..o + 11].copy_from_slice(&(*len as u16).to_le_bytes());
     }
-    let mut frame = [0u8; 7 + 4 + VIDEO_RECT_LEN * VIDEO_RECTS_MAX];
+    let mut frame = [0u8; FRAME_HDR_LEN + FRAME_CRC_LEN + 4 + VIDEO_RECT_LEN * VIDEO_RECTS_MAX];
     let n = build_frame(
         &mut frame,
         FRAME_VIDEO_RECT,
@@ -238,8 +227,9 @@ fn crop_rgba(out: &mut [u8], rgba: &[u8], r: &Rect) {
 // Fragment size and pacing stay unchanged after the transport cutover: the bulk
 // OUT endpoint still has a 64 B FIFO, and decode/SPI—not USB bandwidth—remain
 // the measured panel-rate limit. Fragment i leaves at frame_start +
-// i*interval/count, so the first piece goes out immediately and the last lands
-// on the frame's grid point.
+// i*interval/count, so the first piece goes out immediately and the fragments
+// are spread across the interval; the last lands one sub-interval early, which
+// completes the frame ahead of the next grid point.
 fn send_blob<W: Write>(
     writer: &mut W,
     id: u16,
@@ -249,15 +239,15 @@ fn send_blob<W: Write>(
 ) -> io::Result<()> {
     let count = blob.len().div_ceil(VIDEO_FRAG_MAX).max(1);
     let per_frag = interval / count as u32;
-    let mut payload = [0u8; 8 + VIDEO_FRAG_MAX];
-    let mut frame = [0u8; 7 + FRAME_MAX_PAYLOAD];
+    let mut payload = [0u8; VIDEO_HDR_LEN + VIDEO_FRAG_MAX];
+    let mut frame = [0u8; FRAME_HDR_LEN + FRAME_CRC_LEN + FRAME_MAX_PAYLOAD];
     for (i, part) in blob.chunks(VIDEO_FRAG_MAX).enumerate() {
         payload[0..2].copy_from_slice(&id.to_le_bytes());
         payload[2..4].copy_from_slice(&(i as u16).to_le_bytes());
         payload[4..6].copy_from_slice(&(count as u16).to_le_bytes());
         payload[6..8].copy_from_slice(&(part.len() as u16).to_le_bytes());
-        payload[8..8 + part.len()].copy_from_slice(part);
-        let n = build_frame(&mut frame, FRAME_VIDEO, &payload[..8 + part.len()]);
+        payload[VIDEO_HDR_LEN..VIDEO_HDR_LEN + part.len()].copy_from_slice(part);
+        let n = build_frame(&mut frame, FRAME_VIDEO, &payload[..VIDEO_HDR_LEN + part.len()]);
         writer.write_all(&frame[..n])?;
         let due = frame_start + per_frag * i as u32;
         if let Some(left) = due.checked_duration_since(Instant::now()) {
@@ -388,7 +378,7 @@ struct VideoTx {
     prev: Box<[u8]>, // last readback *enqueued* (i.e. what the panels will show)
     prev_valid: bool,
     full_at: Instant,     // when the last whole-canvas repair started
-    keyframe_step: usize, // quadrant cursor of the repair pass in progress
+    keyframe_step: usize, // slice cursor of the repair pass in progress
     frame_id: u16,
     // The persistent readback entity and the target it copies. The component is
     // attached only while the sender can take a frame: a readback is a
@@ -443,9 +433,9 @@ fn throttle_readback(
     }
 }
 
-#[allow(dead_code)] // stamp asserted by tests; live path keys off seq only
 struct Pose {
     seq: u32,
+    #[allow(dead_code)] // asserted by the fixture test; the live path keys off seq only
     stamp: u32,
     q: Quat,
     gyro: Vec3,
@@ -620,7 +610,7 @@ fn setup_scene(
                 let Some((ty, len)) = parser.push(b, &mut payload) else {
                     continue;
                 };
-                if ty != FRAME_POSE || len != PACKET_LEN {
+                if ty != FRAME_POSE || len != QUAT_PACKET_LEN {
                     continue;
                 }
                 let pose = parse_pose(&payload[..len]);
@@ -822,8 +812,8 @@ fn on_video_readback(readback: On<ReadbackComplete>, mut video: ResMut<VideoTx>)
         return;
     }
     let src = &data[..VIDEO_W * 4 * VIDEO_H];
-    // A repair pass walks the canvas a quadrant at a time; a frame that is not
-    // part of one carries only what changed.
+    // A repair pass walks the canvas a full-height slice at a time; a frame that
+    // is not part of one carries only what changed.
     let starting = video.full_at.elapsed() >= Duration::from_millis(VIDEO_KEYFRAME_MS);
     if starting {
         video.keyframe_step = 0;
@@ -842,7 +832,7 @@ fn on_video_readback(readback: On<ReadbackComplete>, mut video: ResMut<VideoTx>)
     };
     let repair_step = video.keyframe_step;
     if repairing && video.prev_valid {
-        // This pass's quadrant, per eye — unless the dirty box already covers
+        // This pass's slice, per eye — unless the dirty box already covers
         // it, in which case the frame is painting that area anyway.
         for eye in 0..2u8 {
             let q = repair_slice(eye, repair_step);
@@ -994,7 +984,7 @@ mod tests {
     #[test]
     fn parse_pose_roundtrips_the_committed_fixture() {
         let bytes = fixture_bytes();
-        assert_eq!(bytes.len(), PACKET_LEN);
+        assert_eq!(bytes.len(), QUAT_PACKET_LEN);
         let p = parse_pose(&bytes);
         assert_eq!((p.seq, p.stamp), (42, 1000));
         assert_eq!(p.q, Quat::from_xyzw(0.0, 0.0, 0.0, 1.0));
@@ -1004,8 +994,8 @@ mod tests {
     #[test]
     fn frame_parser_recovers_garbage_prefixed_pose_and_rejects_bad_crc() {
         let payload = fixture_bytes();
-        assert_eq!(payload.len(), PACKET_LEN);
-        let mut frame = vec![0u8; 7 + PACKET_LEN];
+        assert_eq!(payload.len(), QUAT_PACKET_LEN);
+        let mut frame = vec![0u8; FRAME_HDR_LEN + FRAME_CRC_LEN + QUAT_PACKET_LEN];
         let n = build_frame(&mut frame, FRAME_POSE, &payload);
         assert_eq!(n, frame.len());
         // Garbage-prefixed valid frame recovers exactly.
@@ -1018,7 +1008,7 @@ mod tests {
             }
         }
         let (ty, len) = got.expect("valid frame must parse");
-        assert_eq!((ty, len), (FRAME_POSE, PACKET_LEN));
+        assert_eq!((ty, len), (FRAME_POSE, QUAT_PACKET_LEN));
         assert_eq!(&out[..len], &payload[..]);
         // One flipped payload byte: parser must yield nothing.
         let mut bad = frame.clone();
@@ -1044,7 +1034,7 @@ mod tests {
         payload.extend_from_slice(&2u16.to_le_bytes()); // count
         payload.extend_from_slice(&3u16.to_le_bytes()); // len
         payload.extend_from_slice(&[0xAA, 0xBB, 0xCC]);
-        let mut frame = vec![0u8; 7 + payload.len()];
+        let mut frame = vec![0u8; FRAME_HDR_LEN + FRAME_CRC_LEN + payload.len()];
         let n = build_frame(&mut frame, FRAME_VIDEO, &payload);
         let mut want = vec![
             0x55, 0xAA, 0x02, 0x0B, 0x00, // magic, FRAME_VIDEO, len = 11
@@ -1175,9 +1165,9 @@ mod tests {
         }
     }
 
-    // The repair pass is the whole canvas, a quadrant per frame per eye: four
-    // steps must tile the panel exactly, stay on the MCU grid, and add up to
-    // nothing more than the canvas it replaces.
+    // The repair pass is the whole canvas, a full-height slice per frame per
+    // eye: four steps must tile the panel exactly, stay on the MCU grid, and add
+    // up to nothing more than the canvas it replaces.
     #[test]
     fn repair_slices_tile_the_panel() {
         let mut area = 0;
@@ -1191,7 +1181,7 @@ mod tests {
                     "{q:?} outside the panel"
                 );
                 area += q.w as usize * q.h as usize;
-                // No overlap with the other quadrants of the same eye.
+                // No overlap with the other slices of the same eye.
                 for other in 0..VIDEO_KEYFRAME_STEPS {
                     if other == step {
                         continue;

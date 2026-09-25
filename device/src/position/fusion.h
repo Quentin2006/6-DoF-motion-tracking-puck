@@ -1,8 +1,6 @@
 #pragma once
 
 #include "mpu6050.h"
-#include "../../config.h"
-#include <math.h>
 
 class Ekf6Dof {
 public:

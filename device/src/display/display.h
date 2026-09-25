@@ -12,9 +12,10 @@ public:
   Display();
   // Best-effort bring-up. Tracking streams even if a panel is unplugged.
   void begin();
-  // Draw engine video. beginBurst opens one SPI transaction, blitTile paints
-  // one canvas tile inside it, endBurst closes it. The video task skips the
-  // transaction entirely when no tile needs painting.
+  // Draw engine video. beginBurst opens one SPI transaction that spans the
+  // whole frame's rectangles, blitTile paints one canvas tile inside it, and
+  // endBurst closes it — the transaction is opened before any tile is known
+  // to need painting, so an all-decode-failed frame still costs one open/close.
   void beginBurst();
   // Paint one VIDEO_TILE x VIDEO_TILE tile at (x, y) inside `panel`, `px`
   // holding VIDEO_TILE contiguous RGB565 pixels per row. Coordinates are the
