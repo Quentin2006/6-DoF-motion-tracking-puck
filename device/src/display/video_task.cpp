@@ -212,4 +212,5 @@ VideoStats videoTakeStats() {
   s.qhi = bulk.rxQueueHighWaterChunks;
   gFrames = gDrops = gBad = 0;
   gRxByteRemainder = rxBytes & kKiBMask;
+  return s;
 }
