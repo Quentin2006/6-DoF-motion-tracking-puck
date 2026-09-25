@@ -230,8 +230,7 @@ const QUESTIONS = [
         "The producer is send_rects, not send_jpeg",
         "The comment should say send_mask, which is the real producer"],
     ok: 0,
-    why: "Before this cleanup a grep for send_jpeg returned exactly one hit in the whole tree: the comment itself. The only hits now are inside this file — the question, the excerpt above, and two distractor options. The engine's function that fragments the blob is send_blob, so a reader chasing the symbol the comment named found nothing, and the assembler reassembles a blob of one JPEG per rectangle, not a single JPEG." },
-
+    why: "Before this cleanup a grep for send_jpeg across the tree returned three hits, and all three were prose: this assembler comment, the AGENTS.md contract section, and a test's header comment. Not one was a definition — the producer is send_blob, so a reader chasing the symbol the comment named found nothing, and the assembler reassembles a blob of one JPEG per rectangle, not a single JPEG. The only hits left are inside this file." },
   { s: "bugs", q: "link.cpp called write_available() and then try_write(), which re-checks the same condition. Was the outer branch a bug?",
     code: "  if (BulkUsb::write_available() < n) {\n    (void)BulkUsb::try_write(frame, n); // account for the non-blocking drop\n    return;\n  }",
     cap: "device/link.cpp:18-21 (before this cleanup)",
@@ -548,7 +547,10 @@ function renderSummary() {
   const h = document.createElement("p");
   h.className = "q";
   h.innerHTML = `<b>${answered()} / ${QUESTIONS.length}</b> answered — ` +
-                `<b>${QUESTIONS.length - wrong.length}</b> correct, ` +
+               // answered() - wrong.length, not length - wrong.length: the
+               // latter folds every skipped question into "correct", so a
+               // partial run reported more correct than questions.
+               `<b>${answered() - wrong.length}</b> correct, ` +
                 `<b>${wrong.length}</b> wrong, <b>${QUESTIONS.length - answered()}</b> skipped.`;
   card.appendChild(h);
 
