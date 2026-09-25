@@ -121,8 +121,8 @@ const QUESTIONS = [
     why: "Two 240×320 panels is 2×153600 B, which at 3.38 MB/s is 90.8 ms. The repo quotes that as 9 fps (device/config.h:91); the arithmetic on those two numbers gives 11 fps, so treat 90.8 ms as the measured figure and 9 fps as the order of magnitude. Either way it is far below the rate the stream targets, which is why nothing repaints the whole canvas unless it must." },
 
   { s: "numbers", q: "Why is the dirty tile 16×16 rather than 8 or 32?",
-    code: "// Dirty-rectangle grid. 16x16 is exactly the 4:2:0 MCU, so a rectangle that is\n// 16-px aligned on every side is a whole number of MCUs and a whole number of\n// tiles, and JPEGDEC's block groups (8 MCUs x 1 at this geometry) never\n// straddle a rectangle edge either.",
-    cap: "device/src/display/video.h:29-32",
+    code: "// Dirty-rectangle grid. 16x16 is exactly the 4:2:0 MCU, so a rectangle that is\n// 16-px aligned on every side is a whole number of MCUs and a whole number of\n// tiles, and JPEGDEC's block groups (8 MCUs x 1 at this geometry) never\n// straddle a rectangle edge either. Rectangles are what make the decode cost",
+    cap: "device/src/display/video.h:29-32 (last clause runs on into :33)",
     a: ["16 is exactly the JPEG 4:2:0 MCU, so rectangles are whole MCUs and decode blocks never straddle an edge",
         "16 is the largest size the panel's controller can address without a page fault",
         "32 would be faster, but 8 would be smaller — 16 is the measured optimum",
@@ -162,8 +162,8 @@ const QUESTIONS = [
 
   // ---- Section 2: Rationale (why this design) -----------------------------
   { s: "rationale", q: "Why not just send a full JPEG every frame and let the device decode the whole canvas?",
-    code: "// decodes nothing that did not change: a full 640x240 decode is ~17 ms of\n// JPEGDEC on this chip (measured, pixel-bound — quality does not move it),",
-    cap: "device/src/display/video.h:15-16",
+    code: "// straddle a rectangle edge either. Rectangles are what make the decode cost\n// track the *changed* area instead of the canvas: the SPI blit is what is left",
+    cap: "device/src/display/video.h:32-33",
     a: ["Decode cost is pixel-bound, so it does not shrink when the scene is static; rectangles make decode track changed area and leave only the SPI blit",
         "A full JPEG would not fit in the frame buffer",
         "The host's encoder is too slow to encode 640x240 at 40 fps",
@@ -204,7 +204,7 @@ const QUESTIONS = [
   { s: "rationale", q: "Why inflate R in the EKF *and* keep a hard gate, instead of one or the other?",
     code: "  // Gate 1: far reject only -> coast on gyro; soft R deweight handles the rest below.\n  if (normDev > EKF_GATE_NORM_FAR) {\n  // ...\n  float ra = EKF_SIGMA_ACCEL * EKF_SIGMA_ACCEL * (1.0f + EKF_GATE_SOFT_K * r * r);\n  // ...\n  // Gate 2: Mahalanobis chi2 3-dof.\n  if (maha > EKF_GATE_MAHA) {",
     cap: "device/src/position/fusion.cpp:119-120,161,197,206 (elided)",
-    a: ["The soft inflation de-weights near-throttle motion smoothly, and the hard gate rejects only the far outliers, so the filter never chatters at a cliff",
+    a: ["The soft inflation de-weights near-threshold motion smoothly, and the hard gate rejects only the far outliers, so the filter never chatters at a cliff",
         "The inflation is a numerical aid; the gate is the real filter",
         "They are two independent filters left over from an earlier design",
         "The gate only runs in debug builds"],
@@ -230,7 +230,7 @@ const QUESTIONS = [
         "The producer is send_rects, not send_jpeg",
         "The comment should say send_mask, which is the real producer"],
     ok: 0,
-    why: "Before this cleanup a grep for send_jpeg returned exactly one hit in the whole tree: the comment itself. The only hits now are inside this quiz — the excerpt above and two distractor options. The engine's function that fragments the blob is send_blob, so a reader chasing the symbol the comment named found nothing, and the assembler reassembles a blob of one JPEG per rectangle, not a single JPEG." },
+    why: "Before this cleanup a grep for send_jpeg returned exactly one hit in the whole tree: the comment itself. The only hits now are inside this file — the question, the excerpt above, and two distractor options. The engine's function that fragments the blob is send_blob, so a reader chasing the symbol the comment named found nothing, and the assembler reassembles a blob of one JPEG per rectangle, not a single JPEG." },
 
   { s: "bugs", q: "link.cpp called write_available() and then try_write(), which re-checks the same condition. Was the outer branch a bug?",
     code: "  if (BulkUsb::write_available() < n) {\n    (void)BulkUsb::try_write(frame, n); // account for the non-blocking drop\n    return;\n  }",
@@ -265,7 +265,7 @@ const QUESTIONS = [
   { s: "bugs", q: "A comment claims the last fragment \"lands on the frame's grid point\". Is it right?",
     code: "// the measured panel-rate limit. Fragment i leaves at frame_start +\n// i*interval/count, so the first piece goes out immediately and the last lands\n// on the frame's grid point.",
     cap: "engine/src/tracking.rs:240-242 (before this cleanup)",
-    a: ["No — fragment i is scheduled at frame_start + (interval/count)*i, so the last lands one sub-interval early, before the next grid point",
+    a: ["No — the write happens before the sleep, so fragment i leaves one step behind its own index and the last lands two sub-intervals before the next grid point",
         "Yes — the sub-intervals exactly partition the frame interval",
         "Yes — the grid is re-anchored after the last fragment",
         "No — fragments are sent as fast as the endpoint accepts them"],
@@ -314,7 +314,7 @@ const QUESTIONS = [
     why: "The magic is excluded because hunting for it is how the parser resynchronizes after garbage; if the magic were covered, a lost byte would look like a bad frame rather than a resync. The CRC covers type + len + payload, CRC-16/CCITT-FALSE, so a payload byte flip is always detected." },
 
   { s: "layout", q: "A FRAME_VIDEO_RECT payload is 4 bytes plus 11 per rectangle. What is in each?",
-    code: "  memcpy(&hdr.frame, pkt + 0, 2);\n  memcpy(&hdr.rects, pkt + 2, 2);\n  // ...\n  const uint8_t *r = pkt + 4 + i * VIDEO_RECT_LEN;\n  out.eye = r[0];\n  memcpy(&out.x, r + 1, 2);\n  // then y, w, h, jpeg_len at +3, +5, +7, +9",
+    code: "  memcpy(&hdr.frame, pkt + 0, 2);\n  memcpy(&hdr.rects, pkt + 2, 2);\n  // ...\n    const uint8_t *r = pkt + 4 + i * VIDEO_RECT_LEN;\n    VideoRect &out = hdr.rect[i];\n    out.eye = r[0];\n    memcpy(&out.x, r + 1, 2);\n    // then y, w, h, jpeg_len at +3, +5, +7, +9",
     cap: "device/src/display/video.h:64-83 (elided; the trailing note is editorial)",
     a: ["header: frame u16 + rects u16; per rectangle: eye u8, then x, y, w, h, jpeg_len as u16 LE",
         "header: frame u32 + rects u32; per rectangle: eye u8 then five u16 BE values",
