@@ -83,8 +83,7 @@ static void runAccelCal(Mpu6050 &mpu) {
 }
 
 // Driver -> body swizzle: body=(sz,sy,sx). Sensor +X (up, ~9.8 at rest) lands
-// on body +Z, matching the EKF gravity [0,0,1]; pitch/roll order verified in
-// live test.
+// on body +Z, matching the EKF gravity [0,0,1].
 static void toBody(const vec3 &v, float out[3]) {
   out[0] = v.z;
   out[1] = v.y;
@@ -184,10 +183,13 @@ bool Tracker::step() {
   }
   float ex, ey, ez, ew;
   ekf_.getQuat(ex, ey, ez, ew);
-  // Display quat: q_disp = QW_ALIGN * q_ekf * QB_ALIGN.
+  // Display quat: q_disp = A * q_ekf * A^-1, the body->view alignment from
+  // config.h. A^-1 is A conjugated (it is a pure 180 deg turn), so the same
+  // two halves with the vector part negated.
   float tx, ty, tz, tw;
-  quatMul(-DISPLAY_ALIGN_HALF, 0.0f, 0.0f, DISPLAY_ALIGN_HALF, ex, ey, ez, ew, tx, ty, tz, tw);
-  quatMul(tx, ty, tz, tw, DISPLAY_ALIGN_HALF, 0.0f, 0.0f, DISPLAY_ALIGN_HALF,
+  quatMul(DISPLAY_ALIGN_AXIS, DISPLAY_ALIGN_AXIS, 0.0f, 0.0f,
+          ex, ey, ez, ew, tx, ty, tz, tw);
+  quatMul(tx, ty, tz, tw, -DISPLAY_ALIGN_AXIS, -DISPLAY_ALIGN_AXIS, 0.0f, 0.0f,
           quat_[0], quat_[1], quat_[2], quat_[3]);
   gyro_[0] = bg[0] * DPS_TO_RPS;
   gyro_[1] = bg[1] * DPS_TO_RPS;
