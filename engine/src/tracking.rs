@@ -535,9 +535,9 @@ fn update(
     } else {
         pose.q
     };
-    // The device bakes a fixed ±90° X sandwich into the display quat, so the
-    // puck's rest orientation is not the reference view; the bias is whatever
-    // orientation the user calls "forward", captured on R.
+    // The device bakes a fixed body->view alignment into the display quat, so
+    // the puck's rest orientation is not the reference view; the bias is
+    // whatever orientation the user calls "forward", captured on R.
     if keys.just_pressed(KeyCode::KeyR) {
         bias.0 = unnorm;
         // Drop the smoothing history: with no previous sample the first biased

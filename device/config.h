@@ -52,8 +52,11 @@ constexpr float EKF_P_BG_INIT = 1e-6f;     // gyro-bias covariance seed, (rad/s)
 constexpr int TFT_MOSI = 11;
 constexpr int TFT_MISO = -1; // the panels are write-only: no MISO is wired
 constexpr int TFT_SCLK = 12;
-constexpr int TFT_CS = 10;  // panel 0 (canvas left half)
-constexpr int TFT_CS2 = 13; // panel 1 (canvas right half)
+// The glasses are crossed on the ribbon: the canvas's left half is on
+// TFT_CS2 and the right half on TFT_CS. Confirmed on hardware by flooding
+// panel 0 alone and watching which glass lit up.
+constexpr int TFT_CS = 13;  // panel 0 (canvas left half)
+constexpr int TFT_CS2 = 10; // panel 1 (canvas right half)
 constexpr int TFT_DC = 9;
 constexpr int TFT_RST = 8;
 constexpr int TFT_BL = 7;
@@ -64,24 +67,32 @@ constexpr int TFT_H = 320;
 constexpr unsigned long TFT_RESET_SETUP_MS = 100;  // output enabled before the pulse
 constexpr unsigned long TFT_RESET_PULSE_MS = 100; // RST held low
 constexpr unsigned long TFT_RESET_WAIT_MS = 200;  // RST high before the first SPI traffic
-// ±90 deg about X, the fixed sandwich Tracker::step() bakes into the display
-// quaternion; cos/sin of half that angle, so the sign lives in one place.
-constexpr float DISPLAY_ALIGN_HALF = 0.70710678f;
+// Body -> view alignment, the fixed sandwich Tracker::step() bakes into the
+// display quaternion (q_disp = A * q_ekf * A^-1). A maps the body's X/Y/Z
+// onto the view's yaw/pitch/roll, so the puck turns the way the wearer does:
+// A = 180 deg about (1,1,0)/sqrt(2), whose quaternion is
+// (DISPLAY_ALIGN_AXIS, DISPLAY_ALIGN_AXIS, 0, 0) — a unit quaternion only
+// because sin(90 deg) = 1 and the axis carries the 1/sqrt(2). This is a
+// conjugation, not a left-multiply, so the rest orientation the EKF starts
+// from is preserved and only the axis labels change.
+constexpr float DISPLAY_ALIGN_AXIS = 0.70710678f;
 // Per-panel mounting, in the same order as the chip selects (0 = TFT_CS,
-// 1 = TFT_CS2): both modules run landscape at 90 deg CW from portrait
-// (rotation 1), but panel 1 is mounted the other way up, so it takes rotation
-// 3 — the same landscape window with both axes flipped, i.e. 180 deg from
-// panel 0. Indexing the rotation keeps the mount a fact of this file instead
-// of a property of the drawing code.
+// 1 = TFT_CS2): both modules run landscape at 90 deg CW from portrait, and the
+// two glasses are bolted 180 deg apart, so one takes rotation 1 and the other
+// rotation 3 — both in the same 320x240 logical window. Indexing the rotation
+// by panel keeps the mount a fact of this file instead of a property of the
+// drawing code.
 //
-// Both panels read 180 deg from where the modules are bolted (the headset is
-// worn the other way up): rotation 1 and 3 are Adafruit's MY|MV and MX|MV, which
-// differ by reversing both axes, so rotation ^ 2 is a 180 deg flip of the image.
-// The flip is free and exact — 1 and 3 share the same 320x240 logical window and
-// init(240, 320) leaves _colstart/_rowstart at 0, so nothing shifts by a pixel —
-// and the rect/tile geometry is unaffected: a 180 deg flip maps the 16x16 tile
-// grid onto itself and leaves a rect's eye-local coordinates meaning what they
-// meant. A 90 deg rotation would move the tiles instead and is not available.
+// The table is indexed by *panel*, not by glass, so it swapped along with the
+// chip selects above: each physical glass keeps the 180 deg orientation its
+// own mounting needs while now serving the opposite eye. Rotations 1 and 3
+// are Adafruit's MY|MV and MX|MV, which differ by reversing both axes, so
+// rotation ^ 2 is a 180 deg flip of the image. The flip is free and exact —
+// 1 and 3 share the same 320x240 logical window and init(240, 320) leaves
+// _colstart/_rowstart at 0, so nothing shifts by a pixel — and the rect/tile
+// geometry is unaffected: a 180 deg flip maps the 16x16 tile grid onto itself
+// and leaves a rect's eye-local coordinates meaning what they meant. A 90 deg
+// rotation would move the tiles instead and is not available.
 constexpr uint8_t TFT_ROTATION[2] = {1, 3};
 // 62.5 MHz: ST7789VW §7.4.3 Table 6 TSCYCW min 16 ns write cycle. Note the
 // core's integer divider on the 80 MHz APB cannot reach it — any request from
