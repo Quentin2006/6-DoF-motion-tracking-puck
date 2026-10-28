@@ -8,6 +8,10 @@ TinyUSB vendor-bulk link to a **Rust/Bevy** desktop engine. The engine drives a
 look-around camera rig. The CH343 COM/UART bridge remains separate for flashing,
 logs, and calibration.
 
+The current prototype tracks orientation and renders a stereo view on two
+320x240 panels. The camera uses rotation only; this project does not currently
+provide positional tracking.
+
 ## Layout
 
 - `device/` — ESP32-S3 Arduino firmware (C++, `arduino-cli`).
@@ -66,6 +70,11 @@ per-second and final lines report sent bytes, errors, and the observed rate;
 any failed bulk write exits non-zero. It measures available transport
 headroom, not a new panel-frame-rate guarantee: decode plus SPI blit remains the
 measured 40-fps painted limit.
+
+The 40-fps figure is a prior hardware measurement documented in the
+architecture notes, not an automated benchmark result or a guarantee for
+every scene. Contract tests validate wire bytes, framing, and fragment handling;
+they do not measure sensor accuracy, end-to-end latency, or headset comfort.
 
 ## Controls
 

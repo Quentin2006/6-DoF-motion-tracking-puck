@@ -1,3 +1,9 @@
 build/
 compile_commands.json
 target/
+
+# Local credentials from the earlier Wi-Fi transport experiments.
+device/secrets.h
+.env
+.env.*
+!.env.example
